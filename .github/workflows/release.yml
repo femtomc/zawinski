@@ -80,6 +80,66 @@ jobs:
           cd release
           sha256sum * > checksums.txt
 
+      - name: Create install script
+        run: |
+          cat > release/install.sh << 'EOF'
+          #!/bin/sh
+          set -e
+
+          # zawinski installer
+          # Usage: curl -fsSL https://github.com/femtomc/zawinski/releases/latest/download/install.sh | sh
+
+          REPO="femtomc/zawinski"
+          INSTALL_DIR="${JWZ_INSTALL_DIR:-$HOME/.local/bin}"
+
+          # Detect OS and architecture
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m)
+
+          case "$OS" in
+            linux) OS="linux" ;;
+            darwin) OS="macos" ;;
+            *) echo "Unsupported OS: $OS"; exit 1 ;;
+          esac
+
+          case "$ARCH" in
+            x86_64|amd64) ARCH="x86_64" ;;
+            aarch64|arm64) ARCH="aarch64" ;;
+            *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+          esac
+
+          BINARY="jwz-${OS}-${ARCH}"
+
+          # Get version
+          if [ -n "$JWZ_VERSION" ]; then
+            VERSION="$JWZ_VERSION"
+          else
+            VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+          fi
+
+          URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY}"
+
+          echo "Installing jwz ${VERSION} for ${OS}/${ARCH}..."
+
+          mkdir -p "$INSTALL_DIR"
+          curl -fsSL "$URL" -o "$INSTALL_DIR/jwz"
+          chmod +x "$INSTALL_DIR/jwz"
+
+          echo "jwz installed to $INSTALL_DIR/jwz"
+
+          if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
+            echo ""
+            echo "Add to your PATH:"
+            echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+          fi
+
+          echo ""
+          echo "Get started:"
+          echo "  jwz init"
+          echo "  jwz topic new general -d 'General discussion'"
+          EOF
+          chmod +x release/install.sh
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:

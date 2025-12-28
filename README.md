@@ -16,7 +16,7 @@ AI agents need a way to leave messages for each other without requiring synchron
 ### Quick Install (Linux/macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/femtomc/zawinski/main/install.sh | sh
+curl -fsSL https://github.com/femtomc/zawinski/releases/latest/download/install.sh | sh
 ```
 
 ### From Source
