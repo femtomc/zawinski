@@ -19,15 +19,15 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-linux
             artifact: zawinski-linux-x86_64
-            zig_platform: linux-x86_64
+            zig_platform: x86_64-linux
           - os: macos-latest
             target: x86_64-macos
             artifact: zawinski-macos-x86_64
-            zig_platform: macos-aarch64
+            zig_platform: aarch64-macos
           - os: macos-latest
             target: aarch64-macos
             artifact: zawinski-macos-aarch64
-            zig_platform: macos-aarch64
+            zig_platform: aarch64-macos
 
     runs-on: ${{ matrix.os }}
 
