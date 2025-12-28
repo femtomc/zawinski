@@ -3,6 +3,9 @@ const zawinski = @import("zawinski");
 
 const Store = zawinski.store.Store;
 const StoreError = zawinski.store.StoreError;
+const Sender = zawinski.store.Sender;
+const GitMeta = zawinski.store.GitMeta;
+const CreateMessageOptions = Store.CreateMessageOptions;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -117,7 +120,12 @@ fn printUsage(stdout: anytype) !void {
         \\Global Options:
         \\  --store PATH            Use store at PATH instead of auto-discovery
         \\
-        \\Command Options:
+        \\Identity Options (post/reply):
+        \\  --as ID                 Sender ID (auto-generated if omitted)
+        \\  --model MODEL           Model name (e.g., claude-3-opus)
+        \\  --role ROLE             Role description (e.g., code-reviewer)
+        \\
+        \\Output Options:
         \\  --json                  Output as JSON
         \\  --quiet                 Output only ID
         \\
@@ -284,6 +292,9 @@ fn cmdPost(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
     var body: ?[]const u8 = null;
     var json = false;
     var quiet = false;
+    var sender_id_arg: ?[]const u8 = null;
+    var model_arg: ?[]const u8 = null;
+    var role_arg: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) {
@@ -296,6 +307,12 @@ fn cmdPost(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
             i += 1;
         } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--message")) {
             body = nextValue(args, &i, "message");
+        } else if (std.mem.eql(u8, arg, "--as")) {
+            sender_id_arg = nextValue(args, &i, "as");
+        } else if (std.mem.eql(u8, arg, "--model")) {
+            model_arg = nextValue(args, &i, "model");
+        } else if (std.mem.eql(u8, arg, "--role")) {
+            role_arg = nextValue(args, &i, "role");
         } else if (arg.len == 0 or arg[0] != '-') {
             topic_name = arg;
             i += 1;
@@ -305,13 +322,46 @@ fn cmdPost(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
     }
 
     if (topic_name == null or body == null) {
-        die("usage: jwz post <topic> -m <message> [--json|--quiet]", .{});
+        die("usage: jwz post <topic> -m <message> [--as ID] [--model M] [--role R] [--json|--quiet]", .{});
     }
 
     const processed_body = processEscapes(allocator, body.?) catch body.?;
     defer if (processed_body.ptr != body.?.ptr) allocator.free(processed_body);
 
-    const id = try store.createMessage(topic_name.?, null, processed_body);
+    // Build sender if any identity flags provided
+    var options: CreateMessageOptions = .{};
+    var sender_id_alloc: ?[]u8 = null;
+    defer if (sender_id_alloc) |sid| allocator.free(sid);
+
+    if (sender_id_arg != null or model_arg != null or role_arg != null) {
+        const sender_id = if (sender_id_arg) |sid| sid else blk: {
+            sender_id_alloc = try store.ulid.nextNow(allocator);
+            break :blk sender_id_alloc.?;
+        };
+        options.sender = Sender{
+            .id = sender_id,
+            .name = zawinski.names.fromUlid(sender_id),
+            .model = model_arg,
+            .role = role_arg,
+        };
+    }
+
+    // Capture git metadata
+    if (zawinski.git.capture(allocator)) |git_info| {
+        options.git = GitMeta{
+            .oid = git_info.oid,
+            .head = git_info.head,
+            .dirty = git_info.dirty,
+            .prefix = git_info.prefix,
+        };
+    }
+    defer if (options.git) |*g| {
+        allocator.free(g.oid);
+        allocator.free(g.head);
+        allocator.free(g.prefix);
+    };
+
+    const id = try store.createMessage(topic_name.?, null, processed_body, options);
     defer allocator.free(id);
 
     if (quiet) {
@@ -330,6 +380,9 @@ fn cmdReply(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: 
     var body: ?[]const u8 = null;
     var json = false;
     var quiet = false;
+    var sender_id_arg: ?[]const u8 = null;
+    var model_arg: ?[]const u8 = null;
+    var role_arg: ?[]const u8 = null;
 
     var i: usize = 0;
     while (i < args.len) {
@@ -342,6 +395,12 @@ fn cmdReply(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: 
             i += 1;
         } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--message")) {
             body = nextValue(args, &i, "message");
+        } else if (std.mem.eql(u8, arg, "--as")) {
+            sender_id_arg = nextValue(args, &i, "as");
+        } else if (std.mem.eql(u8, arg, "--model")) {
+            model_arg = nextValue(args, &i, "model");
+        } else if (std.mem.eql(u8, arg, "--role")) {
+            role_arg = nextValue(args, &i, "role");
         } else if (arg.len == 0 or arg[0] != '-') {
             parent_id = arg;
             i += 1;
@@ -351,7 +410,7 @@ fn cmdReply(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: 
     }
 
     if (parent_id == null or body == null) {
-        die("usage: jwz reply <message-id> -m <message> [--json|--quiet]", .{});
+        die("usage: jwz reply <message-id> -m <message> [--as ID] [--model M] [--role R] [--json|--quiet]", .{});
     }
 
     // Fetch parent to get topic
@@ -370,7 +429,40 @@ fn cmdReply(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: 
     const processed_body = processEscapes(allocator, body.?) catch body.?;
     defer if (processed_body.ptr != body.?.ptr) allocator.free(processed_body);
 
-    const id = try store.createMessage(topic_name, parent.id, processed_body);
+    // Build sender if any identity flags provided
+    var options: CreateMessageOptions = .{};
+    var sender_id_alloc: ?[]u8 = null;
+    defer if (sender_id_alloc) |sid| allocator.free(sid);
+
+    if (sender_id_arg != null or model_arg != null or role_arg != null) {
+        const sender_id = if (sender_id_arg) |sid| sid else blk: {
+            sender_id_alloc = try store.ulid.nextNow(allocator);
+            break :blk sender_id_alloc.?;
+        };
+        options.sender = Sender{
+            .id = sender_id,
+            .name = zawinski.names.fromUlid(sender_id),
+            .model = model_arg,
+            .role = role_arg,
+        };
+    }
+
+    // Capture git metadata
+    if (zawinski.git.capture(allocator)) |git_info| {
+        options.git = GitMeta{
+            .oid = git_info.oid,
+            .head = git_info.head,
+            .dirty = git_info.dirty,
+            .prefix = git_info.prefix,
+        };
+    }
+    defer if (options.git) |*g| {
+        allocator.free(g.oid);
+        allocator.free(g.head);
+        allocator.free(g.prefix);
+    };
+
+    const id = try store.createMessage(topic_name, parent.id, processed_body, options);
     defer allocator.free(id);
 
     if (quiet) {
@@ -485,6 +577,12 @@ fn cmdShow(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
         try stdout.writeByte('\n');
     } else {
         try stdout.print("{s}", .{msg.id});
+        if (msg.sender) |sender| {
+            try stdout.print(" by {s}", .{sender.name});
+            if (sender.model) |model| {
+                try stdout.print(" [{s}]", .{model});
+            }
+        }
         if (msg.reply_count > 0) {
             try stdout.print(" ({d} replies)", .{msg.reply_count});
         }
@@ -555,6 +653,12 @@ fn cmdThread(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
             }
 
             try stdout.print("{s}", .{msg.id});
+            if (msg.sender) |sender| {
+                try stdout.print(" by {s}", .{sender.name});
+                if (sender.model) |model| {
+                    try stdout.print(" [{s}]", .{model});
+                }
+            }
             if (msg.reply_count > 0) {
                 try stdout.print(" ({d} replies)", .{msg.reply_count});
             }
@@ -650,6 +754,12 @@ fn printMessageTree(allocator: std.mem.Allocator, stdout: anytype, store: *Store
     }
 
     try stdout.print("{s}", .{msg.id});
+    if (msg.sender) |sender| {
+        try stdout.print(" by {s}", .{sender.name});
+        if (sender.model) |model| {
+            try stdout.print(" [{s}]", .{model});
+        }
+    }
     if (msg.reply_count > 0) {
         try stdout.print(" ({d} replies)", .{msg.reply_count});
     }
@@ -679,13 +789,52 @@ fn printMessageTree(allocator: std.mem.Allocator, stdout: anytype, store: *Store
 }
 
 fn writeMessageJson(stdout: anytype, msg: zawinski.store.Message) !void {
-    const record = .{
+    // Build sender sub-object if present
+    const SenderJson = struct {
+        id: []const u8,
+        name: []const u8,
+        model: ?[]const u8,
+        role: ?[]const u8,
+    };
+    const sender_json: ?SenderJson = if (msg.sender) |s| .{
+        .id = s.id,
+        .name = s.name,
+        .model = s.model,
+        .role = s.role,
+    } else null;
+
+    // Build git sub-object if present
+    const GitJson = struct {
+        oid: []const u8,
+        head: []const u8,
+        dirty: bool,
+        prefix: []const u8,
+    };
+    const git_json: ?GitJson = if (msg.git) |g| .{
+        .oid = g.oid,
+        .head = g.head,
+        .dirty = g.dirty,
+        .prefix = g.prefix,
+    } else null;
+
+    const record = struct {
+        id: []const u8,
+        topic_id: []const u8,
+        parent_id: ?[]const u8,
+        body: []const u8,
+        created_at: i64,
+        reply_count: i32,
+        sender: ?SenderJson,
+        git: ?GitJson,
+    }{
         .id = msg.id,
         .topic_id = msg.topic_id,
         .parent_id = msg.parent_id,
         .body = msg.body,
         .created_at = msg.created_at,
         .reply_count = msg.reply_count,
+        .sender = sender_json,
+        .git = git_json,
     };
     try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
 }
