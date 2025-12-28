@@ -11,25 +11,25 @@ A local, topic-based messaging system designed for asynchronous, machine-to-mach
 - **Context-Aware**: Automatically captures git state (commit, branch, dirty status) to anchor conversations to specific code versions.
 - **Searchable**: Full-text search via SQLite FTS5 for fast retrieval.
 
-## Installation
-
-### Quick Install (Linux/macOS)
+## Install
 
 ```sh
-curl -fsSL https://github.com/femtomc/zawinski/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/evil-mind-evil-sword/zawinski/releases/latest/download/install.sh | sh
 ```
 
-### From Source
+<details>
+<summary>From source</summary>
 
 Requires the Zig build system.
 
 ```sh
-git clone https://github.com/femtomc/zawinski
+git clone https://github.com/evil-mind-evil-sword/zawinski
 cd zawinski
 zig build -Doptimize=ReleaseFast
 ```
 
 The binary is placed in `zig-out/bin/jwz`.
+</details>
 
 ## Quick Start
 
