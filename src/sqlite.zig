@@ -82,6 +82,14 @@ pub fn bindNull(stmt: *c.sqlite3_stmt, idx: c_int) !void {
     if (rc != c.SQLITE_OK) return Error.SqliteError;
 }
 
+pub fn bindBlob(stmt: *c.sqlite3_stmt, idx: c_int, data: []const u8) !void {
+    // SAFETY: We use SQLITE_STATIC (null destructor) because all callers
+    // execute step() and finalize() within the same scope where the data
+    // buffer is valid. The buffer lifetime is guaranteed by the caller.
+    const rc = c.sqlite3_bind_blob(stmt, idx, data.ptr, @as(c_int, @intCast(data.len)), null);
+    if (rc != c.SQLITE_OK) return Error.SqliteError;
+}
+
 pub fn columnText(stmt: *c.sqlite3_stmt, idx: c_int) []const u8 {
     const ptr = c.sqlite3_column_text(stmt, idx);
     if (ptr == null) return "";
@@ -95,6 +103,13 @@ pub fn columnInt64(stmt: *c.sqlite3_stmt, idx: c_int) i64 {
 
 pub fn columnInt(stmt: *c.sqlite3_stmt, idx: c_int) i32 {
     return c.sqlite3_column_int(stmt, idx);
+}
+
+pub fn columnBlob(stmt: *c.sqlite3_stmt, idx: c_int) []const u8 {
+    const ptr = c.sqlite3_column_blob(stmt, idx);
+    if (ptr == null) return "";
+    const len = c.sqlite3_column_bytes(stmt, idx);
+    return @as([*]const u8, @ptrCast(ptr))[0..@as(usize, @intCast(len))];
 }
 
 pub fn lastInsertRowId(db: *c.sqlite3) i64 {

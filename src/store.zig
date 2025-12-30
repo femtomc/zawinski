@@ -78,6 +78,32 @@ pub const Message = struct {
     }
 };
 
+/// Content-addressable blob storage
+pub const Blob = struct {
+    id: []const u8, // SHA-256 hash
+    size: u64,
+    mime_type: ?[]const u8,
+    created_at: i64,
+
+    pub fn deinit(self: *Blob, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        if (self.mime_type) |mt| allocator.free(mt);
+    }
+};
+
+/// Attachment linking a blob to a message
+pub const Attachment = struct {
+    message_id: []const u8,
+    blob_id: []const u8,
+    name: ?[]const u8,
+
+    pub fn deinit(self: *Attachment, allocator: std.mem.Allocator) void {
+        allocator.free(self.message_id);
+        allocator.free(self.blob_id);
+        if (self.name) |n| allocator.free(n);
+    }
+};
+
 pub const Store = struct {
     allocator: std.mem.Allocator,
     db: *sqlite.c.sqlite3,
@@ -122,6 +148,23 @@ pub const Store = struct {
         \\CREATE TABLE IF NOT EXISTS meta (
         \\  key TEXT PRIMARY KEY,
         \\  value TEXT NOT NULL
+        \\);
+        \\
+        \\CREATE TABLE IF NOT EXISTS blobs (
+        \\  id TEXT PRIMARY KEY,
+        \\  data BLOB NOT NULL,
+        \\  size INTEGER NOT NULL,
+        \\  mime_type TEXT,
+        \\  created_at INTEGER NOT NULL
+        \\);
+        \\
+        \\CREATE TABLE IF NOT EXISTS attachments (
+        \\  message_id TEXT NOT NULL,
+        \\  blob_id TEXT NOT NULL,
+        \\  name TEXT,
+        \\  PRIMARY KEY (message_id, blob_id),
+        \\  FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,
+        \\  FOREIGN KEY(blob_id) REFERENCES blobs(id)
         \\);
     ;
 
@@ -1090,6 +1133,123 @@ pub const Store = struct {
         try sqlite.bindText(stmt, 1, key);
         try sqlite.bindText(stmt, 2, val_str);
         _ = try sqlite.step(stmt);
+    }
+
+    // ========== Blob Operations ==========
+
+    /// Store a blob, returns the content hash (sha256:...)
+    /// If the blob already exists, returns the existing hash without inserting.
+    pub fn putBlob(self: *Store, data: []const u8, mime_type: ?[]const u8) ![]u8 {
+        // Compute SHA-256 hash
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(data, &hash, .{});
+
+        // Format as hex string with sha256: prefix
+        var hash_buf: [71]u8 = undefined; // "sha256:" + 64 hex chars
+        @memcpy(hash_buf[0..7], "sha256:");
+        _ = std.fmt.bufPrint(hash_buf[7..71], "{x}", .{hash}) catch unreachable;
+        const id = hash_buf[0..71];
+
+        // Check if blob already exists
+        const check_stmt = try sqlite.prepare(self.db, "SELECT 1 FROM blobs WHERE id = ?;");
+        defer sqlite.finalize(check_stmt);
+        try sqlite.bindText(check_stmt, 1, id);
+        if (try sqlite.step(check_stmt)) {
+            // Already exists, return copy of id
+            return self.allocator.dupe(u8, id);
+        }
+
+        // Insert new blob
+        const now_ms = @as(i64, @intCast(std.time.milliTimestamp()));
+
+        try self.beginImmediate();
+        errdefer sqlite.exec(self.db, "ROLLBACK;") catch {};
+
+        const stmt = try sqlite.prepare(self.db, "INSERT INTO blobs (id, data, size, mime_type, created_at) VALUES (?, ?, ?, ?, ?);");
+        defer sqlite.finalize(stmt);
+        try sqlite.bindText(stmt, 1, id);
+        try sqlite.bindBlob(stmt, 2, data);
+        try sqlite.bindInt64(stmt, 3, @as(i64, @intCast(data.len)));
+        if (mime_type) |mt| {
+            try sqlite.bindText(stmt, 4, mt);
+        } else {
+            try sqlite.bindNull(stmt, 4);
+        }
+        try sqlite.bindInt64(stmt, 5, now_ms);
+        _ = try sqlite.step(stmt);
+
+        try self.commit();
+
+        return self.allocator.dupe(u8, id);
+    }
+
+    /// Get blob data by id (sha256:...)
+    pub fn getBlob(self: *Store, blob_id: []const u8) ![]u8 {
+        const stmt = try sqlite.prepare(self.db, "SELECT data FROM blobs WHERE id = ?;");
+        defer sqlite.finalize(stmt);
+        try sqlite.bindText(stmt, 1, blob_id);
+
+        if (try sqlite.step(stmt)) {
+            const data = sqlite.columnBlob(stmt, 0);
+            return self.allocator.dupe(u8, data);
+        }
+        return error.BlobNotFound;
+    }
+
+    /// Get blob metadata by id
+    pub fn fetchBlob(self: *Store, blob_id: []const u8) !Blob {
+        const stmt = try sqlite.prepare(self.db, "SELECT id, size, mime_type, created_at FROM blobs WHERE id = ?;");
+        defer sqlite.finalize(stmt);
+        try sqlite.bindText(stmt, 1, blob_id);
+
+        if (try sqlite.step(stmt)) {
+            const mime_text = sqlite.columnText(stmt, 2);
+            return Blob{
+                .id = try self.allocator.dupe(u8, sqlite.columnText(stmt, 0)),
+                .size = @as(u64, @intCast(sqlite.columnInt64(stmt, 1))),
+                .mime_type = if (mime_text.len > 0) try self.allocator.dupe(u8, mime_text) else null,
+                .created_at = sqlite.columnInt64(stmt, 3),
+            };
+        }
+        return error.BlobNotFound;
+    }
+
+    /// Attach a blob to a message
+    pub fn attachBlob(self: *Store, message_id: []const u8, blob_id: []const u8, name: ?[]const u8) !void {
+        const stmt = try sqlite.prepare(self.db, "INSERT OR REPLACE INTO attachments (message_id, blob_id, name) VALUES (?, ?, ?);");
+        defer sqlite.finalize(stmt);
+        try sqlite.bindText(stmt, 1, message_id);
+        try sqlite.bindText(stmt, 2, blob_id);
+        if (name) |n| {
+            try sqlite.bindText(stmt, 3, n);
+        } else {
+            try sqlite.bindNull(stmt, 3);
+        }
+        _ = try sqlite.step(stmt);
+    }
+
+    /// List attachments for a message
+    pub fn listAttachments(self: *Store, message_id: []const u8) ![]Attachment {
+        var attachments: std.ArrayList(Attachment) = .empty;
+        errdefer {
+            for (attachments.items) |*a| a.deinit(self.allocator);
+            attachments.deinit(self.allocator);
+        }
+
+        const stmt = try sqlite.prepare(self.db, "SELECT message_id, blob_id, name FROM attachments WHERE message_id = ?;");
+        defer sqlite.finalize(stmt);
+        try sqlite.bindText(stmt, 1, message_id);
+
+        while (try sqlite.step(stmt)) {
+            const name_text = sqlite.columnText(stmt, 2);
+            try attachments.append(self.allocator, Attachment{
+                .message_id = try self.allocator.dupe(u8, sqlite.columnText(stmt, 0)),
+                .blob_id = try self.allocator.dupe(u8, sqlite.columnText(stmt, 1)),
+                .name = if (name_text.len > 0) try self.allocator.dupe(u8, name_text) else null,
+            });
+        }
+
+        return attachments.toOwnedSlice(self.allocator);
     }
 };
 

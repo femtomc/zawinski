@@ -92,6 +92,8 @@ pub fn main() !void {
             break :blk cmdThread(allocator, stdout, &store, args.items[2..]);
         } else if (std.mem.eql(u8, cmd, "search")) {
             break :blk cmdSearch(allocator, stdout, &store, args.items[2..]);
+        } else if (std.mem.eql(u8, cmd, "blob")) {
+            break :blk cmdBlob(allocator, stdout, &store, args.items[2..]);
         } else {
             die("unknown command: {s}", .{cmd});
         }
@@ -116,6 +118,9 @@ fn printUsage(stdout: anytype) !void {
         \\  show <id>               Show a message
         \\  thread <id>             Show a message and all replies
         \\  search <query>          Search messages
+        \\  blob put <file>         Store a blob, output content hash
+        \\  blob get <hash>         Retrieve blob data by hash
+        \\  blob info <hash>        Show blob metadata
         \\
         \\Global Options:
         \\  --store PATH            Use store at PATH instead of auto-discovery
@@ -736,6 +741,152 @@ fn cmdSearch(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
                 try stdout.writeAll("\n\n");
             }
         }
+    }
+}
+
+fn cmdBlob(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+    if (args.len < 1) {
+        die("usage: jwz blob <put|get|info> [options]", .{});
+    }
+
+    const subcmd = args[0];
+
+    if (std.mem.eql(u8, subcmd, "put")) {
+        try cmdBlobPut(allocator, stdout, store, args[1..]);
+    } else if (std.mem.eql(u8, subcmd, "get")) {
+        try cmdBlobGet(allocator, stdout, store, args[1..]);
+    } else if (std.mem.eql(u8, subcmd, "info")) {
+        try cmdBlobInfo(allocator, stdout, store, args[1..]);
+    } else {
+        die("unknown blob subcommand: {s}", .{subcmd});
+    }
+}
+
+fn cmdBlobPut(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+    var file_path: ?[]const u8 = null;
+    var mime_type: ?[]const u8 = null;
+    var json = false;
+
+    var i: usize = 0;
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--mime") or std.mem.eql(u8, arg, "-t")) {
+            mime_type = nextValue(args, &i, "mime");
+        } else if (arg.len == 0 or arg[0] != '-') {
+            file_path = arg;
+            i += 1;
+        } else {
+            die("unknown option: {s}", .{arg});
+        }
+    }
+
+    if (file_path == null) {
+        die("usage: jwz blob put <file> [--mime TYPE] [--json]", .{});
+    }
+
+    // Read file contents
+    const file = std.fs.cwd().openFile(file_path.?, .{}) catch |err| {
+        die("cannot open file: {s}", .{@errorName(err)});
+    };
+    defer file.close();
+
+    const data = file.readToEndAlloc(allocator, 100 * 1024 * 1024) catch |err| {
+        die("cannot read file: {s}", .{@errorName(err)});
+    };
+    defer allocator.free(data);
+
+    // Store blob
+    const blob_id = try store.putBlob(data, mime_type);
+    defer allocator.free(blob_id);
+
+    if (json) {
+        const record = .{ .id = blob_id, .size = data.len };
+        try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
+        try stdout.writeByte('\n');
+    } else {
+        try stdout.print("{s}\n", .{blob_id});
+    }
+}
+
+fn cmdBlobGet(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+    var blob_id: ?[]const u8 = null;
+
+    var i: usize = 0;
+    while (i < args.len) {
+        const arg = args[i];
+        if (arg.len == 0 or arg[0] != '-') {
+            blob_id = arg;
+            i += 1;
+        } else {
+            die("unknown option: {s}", .{arg});
+        }
+    }
+
+    if (blob_id == null) {
+        die("usage: jwz blob get <hash>", .{});
+    }
+
+    const data = store.getBlob(blob_id.?) catch |err| {
+        if (err == error.BlobNotFound) {
+            die("blob not found: {s}", .{blob_id.?});
+        }
+        return err;
+    };
+    defer allocator.free(data);
+
+    // Write raw blob data to stdout
+    try stdout.writeAll(data);
+}
+
+fn cmdBlobInfo(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+    var blob_id: ?[]const u8 = null;
+    var json = false;
+
+    var i: usize = 0;
+    while (i < args.len) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+            i += 1;
+        } else if (arg.len == 0 or arg[0] != '-') {
+            blob_id = arg;
+            i += 1;
+        } else {
+            die("unknown option: {s}", .{arg});
+        }
+    }
+
+    if (blob_id == null) {
+        die("usage: jwz blob info <hash> [--json]", .{});
+    }
+
+    var blob = store.fetchBlob(blob_id.?) catch |err| {
+        if (err == error.BlobNotFound) {
+            die("blob not found: {s}", .{blob_id.?});
+        }
+        return err;
+    };
+    defer blob.deinit(allocator);
+
+    if (json) {
+        const record = .{
+            .id = blob.id,
+            .size = blob.size,
+            .mime_type = blob.mime_type,
+            .created_at = blob.created_at,
+        };
+        try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
+        try stdout.writeByte('\n');
+    } else {
+        try stdout.print("ID: {s}\n", .{blob.id});
+        try stdout.print("Size: {d} bytes\n", .{blob.size});
+        if (blob.mime_type) |mt| {
+            try stdout.print("Type: {s}\n", .{mt});
+        }
+        try stdout.print("Created: {s}\n", .{formatTimeAgo(blob.created_at)});
     }
 }
 
