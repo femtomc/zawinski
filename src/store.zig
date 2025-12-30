@@ -1139,6 +1139,7 @@ pub const Store = struct {
 
     /// Store a blob, returns the content hash (sha256:...)
     /// If the blob already exists, returns the existing hash without inserting.
+    /// Uses INSERT OR IGNORE for atomic deduplication (no race conditions).
     pub fn putBlob(self: *Store, data: []const u8, mime_type: ?[]const u8) ![]u8 {
         // Compute SHA-256 hash
         var hash: [32]u8 = undefined;
@@ -1150,22 +1151,10 @@ pub const Store = struct {
         _ = std.fmt.bufPrint(hash_buf[7..71], "{x}", .{hash}) catch unreachable;
         const id = hash_buf[0..71];
 
-        // Check if blob already exists
-        const check_stmt = try sqlite.prepare(self.db, "SELECT 1 FROM blobs WHERE id = ?;");
-        defer sqlite.finalize(check_stmt);
-        try sqlite.bindText(check_stmt, 1, id);
-        if (try sqlite.step(check_stmt)) {
-            // Already exists, return copy of id
-            return self.allocator.dupe(u8, id);
-        }
-
-        // Insert new blob
+        // Insert blob atomically (INSERT OR IGNORE handles duplicates)
         const now_ms = @as(i64, @intCast(std.time.milliTimestamp()));
 
-        try self.beginImmediate();
-        errdefer sqlite.exec(self.db, "ROLLBACK;") catch {};
-
-        const stmt = try sqlite.prepare(self.db, "INSERT INTO blobs (id, data, size, mime_type, created_at) VALUES (?, ?, ?, ?, ?);");
+        const stmt = try sqlite.prepare(self.db, "INSERT OR IGNORE INTO blobs (id, data, size, mime_type, created_at) VALUES (?, ?, ?, ?, ?);");
         defer sqlite.finalize(stmt);
         try sqlite.bindText(stmt, 1, id);
         try sqlite.bindBlob(stmt, 2, data);
@@ -1177,8 +1166,6 @@ pub const Store = struct {
         }
         try sqlite.bindInt64(stmt, 5, now_ms);
         _ = try sqlite.step(stmt);
-
-        try self.commit();
 
         return self.allocator.dupe(u8, id);
     }
