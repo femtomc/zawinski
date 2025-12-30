@@ -78,6 +78,46 @@ pub const Message = struct {
     }
 };
 
+/// Claude session metadata
+pub const Session = struct {
+    id: []const u8,
+    project_path: []const u8,
+    started_at: ?i64,
+    last_synced_at: ?i64,
+    sync_offset: i64,
+
+    pub fn deinit(self: *Session, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.project_path);
+    }
+};
+
+/// Claude transcript entry
+pub const TranscriptEntry = struct {
+    id: []const u8,
+    session_id: []const u8,
+    parent_id: ?[]const u8,
+    type: []const u8,
+    role: ?[]const u8,
+    content: ?[]const u8,
+    cwd: ?[]const u8,
+    git_branch: ?[]const u8,
+    timestamp: i64,
+    raw_json: ?[]const u8,
+
+    pub fn deinit(self: *TranscriptEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.session_id);
+        if (self.parent_id) |p| allocator.free(p);
+        allocator.free(self.type);
+        if (self.role) |r| allocator.free(r);
+        if (self.content) |c| allocator.free(c);
+        if (self.cwd) |c| allocator.free(c);
+        if (self.git_branch) |g| allocator.free(g);
+        if (self.raw_json) |r| allocator.free(r);
+    }
+};
+
 /// Content-addressable blob storage
 pub const Blob = struct {
     id: []const u8, // SHA-256 hash
@@ -166,6 +206,32 @@ pub const Store = struct {
         \\  FOREIGN KEY(message_id) REFERENCES messages(id) ON DELETE CASCADE,
         \\  FOREIGN KEY(blob_id) REFERENCES blobs(id)
         \\);
+        \\
+        \\-- Claude transcript storage
+        \\CREATE TABLE IF NOT EXISTS sessions (
+        \\  id TEXT PRIMARY KEY,
+        \\  project_path TEXT NOT NULL,
+        \\  started_at INTEGER,
+        \\  last_synced_at INTEGER,
+        \\  sync_offset INTEGER DEFAULT 0
+        \\);
+        \\CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_path);
+        \\
+        \\CREATE TABLE IF NOT EXISTS transcripts (
+        \\  id TEXT PRIMARY KEY,
+        \\  session_id TEXT NOT NULL,
+        \\  parent_id TEXT,
+        \\  type TEXT NOT NULL,
+        \\  role TEXT,
+        \\  content TEXT,
+        \\  cwd TEXT,
+        \\  git_branch TEXT,
+        \\  timestamp INTEGER NOT NULL,
+        \\  raw_json TEXT,
+        \\  FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        \\);
+        \\CREATE INDEX IF NOT EXISTS idx_transcripts_session ON transcripts(session_id);
+        \\CREATE INDEX IF NOT EXISTS idx_transcripts_timestamp ON transcripts(timestamp);
     ;
 
     pub fn init(allocator: std.mem.Allocator, dir: []const u8) !void {
@@ -1237,6 +1303,231 @@ pub const Store = struct {
         }
 
         return attachments.toOwnedSlice(self.allocator);
+    }
+
+    // ========== Transcript Sync Operations ==========
+
+    /// Sync a Claude transcript file to the database.
+    /// Reads from the given file path, starting at the session's sync_offset.
+    /// Returns the number of entries synced.
+    pub fn syncTranscript(self: *Store, transcript_path: []const u8, session_id: []const u8, project_path: []const u8) !u32 {
+        // Get or create session
+        const offset = try self.getOrCreateSession(session_id, project_path);
+
+        // Open transcript file
+        var file = std.fs.openFileAbsolute(transcript_path, .{ .mode = .read_only }) catch |err| switch (err) {
+            error.FileNotFound => return 0,
+            else => return err,
+        };
+        defer file.close();
+
+        // Get file size
+        const stat = try file.stat();
+        const file_size = stat.size;
+
+        // Nothing new to sync
+        if (file_size <= offset) return 0;
+
+        // Seek to offset and read new content
+        try file.seekTo(offset);
+        const content = try file.readToEndAlloc(self.allocator, 100 * 1024 * 1024);
+        defer self.allocator.free(content);
+
+        // Begin transaction
+        try self.beginImmediate();
+        errdefer sqlite.exec(self.db, "ROLLBACK;") catch {};
+
+        var count: u32 = 0;
+        var iter = std.mem.splitScalar(u8, content, '\n');
+        while (iter.next()) |raw_line| {
+            const line = std.mem.trim(u8, raw_line, "\r\n\t ");
+            if (line.len == 0) continue;
+
+            if (self.insertTranscriptEntry(session_id, line)) {
+                count += 1;
+            } else |_| {
+                // Skip malformed entries
+            }
+        }
+
+        // Update session sync offset and timestamp
+        const new_offset = offset + @as(u64, @intCast(content.len));
+        const now_ms = @as(i64, @intCast(std.time.milliTimestamp()));
+        try self.updateSessionSync(session_id, @intCast(new_offset), now_ms);
+
+        try self.commit();
+        return count;
+    }
+
+    fn getOrCreateSession(self: *Store, session_id: []const u8, project_path: []const u8) !u64 {
+        // Try to get existing session
+        const select_stmt = try sqlite.prepare(self.db, "SELECT sync_offset FROM sessions WHERE id = ?;");
+        defer sqlite.finalize(select_stmt);
+        try sqlite.bindText(select_stmt, 1, session_id);
+
+        if (try sqlite.step(select_stmt)) {
+            const offset = sqlite.columnInt64(select_stmt, 0);
+            return if (offset >= 0) @intCast(offset) else 0;
+        }
+
+        // Create new session
+        const now_ms = @as(i64, @intCast(std.time.milliTimestamp()));
+        const insert_stmt = try sqlite.prepare(self.db, "INSERT INTO sessions (id, project_path, started_at, sync_offset) VALUES (?, ?, ?, 0);");
+        defer sqlite.finalize(insert_stmt);
+        try sqlite.bindText(insert_stmt, 1, session_id);
+        try sqlite.bindText(insert_stmt, 2, project_path);
+        try sqlite.bindInt64(insert_stmt, 3, now_ms);
+        _ = try sqlite.step(insert_stmt);
+
+        return 0;
+    }
+
+    fn updateSessionSync(self: *Store, session_id: []const u8, offset: i64, timestamp: i64) !void {
+        const stmt = try sqlite.prepare(self.db, "UPDATE sessions SET sync_offset = ?, last_synced_at = ? WHERE id = ?;");
+        defer sqlite.finalize(stmt);
+        try sqlite.bindInt64(stmt, 1, offset);
+        try sqlite.bindInt64(stmt, 2, timestamp);
+        try sqlite.bindText(stmt, 3, session_id);
+        _ = try sqlite.step(stmt);
+    }
+
+    fn insertTranscriptEntry(self: *Store, session_id: []const u8, line: []const u8) !void {
+        var parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, line, .{});
+        defer parsed.deinit();
+
+        const obj = parsed.value.object;
+
+        // Extract fields
+        const uuid = if (obj.get("uuid")) |v| v.string else return error.InvalidMessageId;
+        const entry_type = if (obj.get("type")) |v| v.string else return error.InvalidMessageId;
+        const parent_uuid = if (obj.get("parentUuid")) |v| switch (v) {
+            .string => |s| s,
+            .null => null,
+            else => null,
+        } else null;
+
+        // Extract timestamp (Claude uses milliseconds)
+        const timestamp_str = if (obj.get("timestamp")) |v| switch (v) {
+            .string => |s| std.fmt.parseInt(i64, s, 10) catch 0,
+            .integer => |i| i,
+            else => 0,
+        } else 0;
+
+        // Extract message fields if present
+        var role: ?[]const u8 = null;
+        var content: ?[]const u8 = null;
+        if (obj.get("message")) |msg_val| {
+            if (msg_val == .object) {
+                const msg_obj = msg_val.object;
+                role = if (msg_obj.get("role")) |v| if (v == .string) v.string else null else null;
+                content = if (msg_obj.get("content")) |v| if (v == .string) v.string else null else null;
+            }
+        }
+
+        // Extract context fields
+        const cwd = if (obj.get("cwd")) |v| if (v == .string) v.string else null else null;
+        const git_branch = if (obj.get("gitBranch")) |v| if (v == .string) v.string else null else null;
+
+        // Insert entry
+        const stmt = try sqlite.prepare(self.db,
+            \\INSERT OR IGNORE INTO transcripts
+            \\  (id, session_id, parent_id, type, role, content, cwd, git_branch, timestamp, raw_json)
+            \\VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        );
+        defer sqlite.finalize(stmt);
+
+        try sqlite.bindText(stmt, 1, uuid);
+        try sqlite.bindText(stmt, 2, session_id);
+        if (parent_uuid) |p| try sqlite.bindText(stmt, 3, p) else try sqlite.bindNull(stmt, 3);
+        try sqlite.bindText(stmt, 4, entry_type);
+        if (role) |r| try sqlite.bindText(stmt, 5, r) else try sqlite.bindNull(stmt, 5);
+        if (content) |c| try sqlite.bindText(stmt, 6, c) else try sqlite.bindNull(stmt, 6);
+        if (cwd) |c| try sqlite.bindText(stmt, 7, c) else try sqlite.bindNull(stmt, 7);
+        if (git_branch) |g| try sqlite.bindText(stmt, 8, g) else try sqlite.bindNull(stmt, 8);
+        try sqlite.bindInt64(stmt, 9, timestamp_str);
+        try sqlite.bindText(stmt, 10, line);
+
+        _ = try sqlite.step(stmt);
+    }
+
+    /// List sessions, optionally filtered by project path
+    pub fn listSessions(self: *Store, project_path: ?[]const u8) ![]Session {
+        var sessions: std.ArrayList(Session) = .empty;
+        errdefer {
+            for (sessions.items) |*s| s.deinit(self.allocator);
+            sessions.deinit(self.allocator);
+        }
+
+        const sql = if (project_path != null)
+            "SELECT id, project_path, started_at, last_synced_at, sync_offset FROM sessions WHERE project_path = ? ORDER BY started_at DESC;"
+        else
+            "SELECT id, project_path, started_at, last_synced_at, sync_offset FROM sessions ORDER BY started_at DESC;";
+
+        const stmt = try sqlite.prepare(self.db, sql);
+        defer sqlite.finalize(stmt);
+
+        if (project_path) |p| {
+            try sqlite.bindText(stmt, 1, p);
+        }
+
+        while (try sqlite.step(stmt)) {
+            try sessions.append(self.allocator, Session{
+                .id = try self.allocator.dupe(u8, sqlite.columnText(stmt, 0)),
+                .project_path = try self.allocator.dupe(u8, sqlite.columnText(stmt, 1)),
+                .started_at = blk: {
+                    const v = sqlite.columnInt64(stmt, 2);
+                    break :blk if (v == 0) null else v;
+                },
+                .last_synced_at = blk: {
+                    const v = sqlite.columnInt64(stmt, 3);
+                    break :blk if (v == 0) null else v;
+                },
+                .sync_offset = sqlite.columnInt64(stmt, 4),
+            });
+        }
+
+        return sessions.toOwnedSlice(self.allocator);
+    }
+
+    /// List transcript entries for a session
+    pub fn listTranscriptEntries(self: *Store, session_id: []const u8, limit: u32) ![]TranscriptEntry {
+        var entries: std.ArrayList(TranscriptEntry) = .empty;
+        errdefer {
+            for (entries.items) |*e| e.deinit(self.allocator);
+            entries.deinit(self.allocator);
+        }
+
+        const stmt = try sqlite.prepare(self.db,
+            \\SELECT id, session_id, parent_id, type, role, content, cwd, git_branch, timestamp, raw_json
+            \\FROM transcripts WHERE session_id = ? ORDER BY timestamp ASC LIMIT ?;
+        );
+        defer sqlite.finalize(stmt);
+        try sqlite.bindText(stmt, 1, session_id);
+        try sqlite.bindInt(stmt, 2, @as(i32, @intCast(limit)));
+
+        while (try sqlite.step(stmt)) {
+            const parent_text = sqlite.columnText(stmt, 2);
+            const role_text = sqlite.columnText(stmt, 4);
+            const content_text = sqlite.columnText(stmt, 5);
+            const cwd_text = sqlite.columnText(stmt, 6);
+            const git_branch_text = sqlite.columnText(stmt, 7);
+            const raw_json_text = sqlite.columnText(stmt, 9);
+
+            try entries.append(self.allocator, TranscriptEntry{
+                .id = try self.allocator.dupe(u8, sqlite.columnText(stmt, 0)),
+                .session_id = try self.allocator.dupe(u8, sqlite.columnText(stmt, 1)),
+                .parent_id = if (parent_text.len > 0) try self.allocator.dupe(u8, parent_text) else null,
+                .type = try self.allocator.dupe(u8, sqlite.columnText(stmt, 3)),
+                .role = if (role_text.len > 0) try self.allocator.dupe(u8, role_text) else null,
+                .content = if (content_text.len > 0) try self.allocator.dupe(u8, content_text) else null,
+                .cwd = if (cwd_text.len > 0) try self.allocator.dupe(u8, cwd_text) else null,
+                .git_branch = if (git_branch_text.len > 0) try self.allocator.dupe(u8, git_branch_text) else null,
+                .timestamp = sqlite.columnInt64(stmt, 8),
+                .raw_json = if (raw_json_text.len > 0) try self.allocator.dupe(u8, raw_json_text) else null,
+            });
+        }
+
+        return entries.toOwnedSlice(self.allocator);
     }
 };
 
