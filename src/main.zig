@@ -52,6 +52,13 @@ pub fn main() !void {
 
     const cmd = args.items[1];
 
+    // Handle version before anything else
+    if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V")) {
+        try stdout.writeAll("jwz 0.4.1\n");
+        try stdout.flush();
+        return;
+    }
+
     // Handle init before store discovery
     if (std.mem.eql(u8, cmd, "init")) {
         cmdInit(allocator, stdout, args.items[2..], explicit_store) catch |err| {
