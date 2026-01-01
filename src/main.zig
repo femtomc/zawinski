@@ -54,7 +54,7 @@ pub fn main() !void {
 
     // Handle version before anything else
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V")) {
-        try stdout.writeAll("jwz 0.6.0\n");
+        try stdout.writeAll("jwz 0.6.1\n");
         try stdout.flush();
         return;
     }
@@ -565,7 +565,7 @@ fn cmdRead(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
         try stdout.writeByte('[');
         for (messages, 0..) |msg, idx| {
             if (idx > 0) try stdout.writeByte(',');
-            try writeMessageJson(stdout, msg);
+            try writeMessageJsonWithDepth(stdout, msg, 0); // Top-level messages have depth 0
         }
         try stdout.writeAll("]\n");
     } else {
@@ -746,19 +746,21 @@ fn cmdThread(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
             try stdout.print(" {s}\n", .{formatTimeAgo(msg.created_at)});
 
             // Print body with indentation (truncated in summary mode)
+            const body_indent = depth + 1;
             indent_i = 0;
-            while (indent_i < depth + 1) : (indent_i += 1) {
+            while (indent_i < body_indent) : (indent_i += 1) {
                 try stdout.writeAll("  ");
             }
             if (summary) {
-                // Show first line only, truncated to 80 chars
+                // Show first line only, truncated to 80 chars (UTF-8 safe)
                 const first_line = if (std.mem.indexOf(u8, msg.body, "\n")) |nl| msg.body[0..nl] else msg.body;
-                const truncated = if (first_line.len > 80) first_line[0..77] else first_line;
-                try stdout.print("{s}", .{truncated});
-                if (first_line.len > 80) try stdout.writeAll("...");
+                const truncated = truncateUtf8(first_line, 77);
+                try stdout.writeAll(truncated);
+                if (first_line.len > 77) try stdout.writeAll("...");
                 try stdout.writeAll("\n\n");
             } else {
-                try stdout.print("{s}\n\n", .{msg.body});
+                try printIndented(stdout, msg.body, body_indent);
+                try stdout.writeAll("\n\n");
             }
         }
     }
@@ -1011,19 +1013,21 @@ fn printMessageTree(allocator: std.mem.Allocator, stdout: anytype, store: *Store
     try stdout.print(" {s}\n", .{formatTimeAgo(msg.created_at)});
 
     // Print body (truncated in summary mode)
+    const body_indent = depth + 1;
     indent_i = 0;
-    while (indent_i < depth + 1) : (indent_i += 1) {
+    while (indent_i < body_indent) : (indent_i += 1) {
         try stdout.writeAll("  ");
     }
     if (summary) {
-        // Show first line only, truncated to 80 chars
+        // Show first line only, truncated to 80 chars (UTF-8 safe)
         const first_line = if (std.mem.indexOf(u8, msg.body, "\n")) |nl| msg.body[0..nl] else msg.body;
-        const truncated = if (first_line.len > 80) first_line[0..77] else first_line;
-        try stdout.print("{s}", .{truncated});
-        if (first_line.len > 80) try stdout.writeAll("...");
+        const truncated = truncateUtf8(first_line, 77);
+        try stdout.writeAll(truncated);
+        if (first_line.len > 77) try stdout.writeAll("...");
         try stdout.writeAll("\n\n");
     } else {
-        try stdout.print("{s}\n\n", .{msg.body});
+        try printIndented(stdout, msg.body, body_indent);
+        try stdout.writeAll("\n\n");
     }
 
     // Print replies (increased depth limit to 10 for better conversation visibility)
@@ -1109,6 +1113,36 @@ fn formatTimeAgo(timestamp_ms: i64) []const u8 {
     if (diff_s < 3600) return "minutes ago";
     if (diff_s < 86400) return "hours ago";
     return "days ago";
+}
+
+/// Print text with proper indentation on each line
+fn printIndented(stdout: anytype, text: []const u8, indent: u32) !void {
+    var iter = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (iter.next()) |line| {
+        if (!first) {
+            try stdout.writeByte('\n');
+            var i: u32 = 0;
+            while (i < indent) : (i += 1) {
+                try stdout.writeAll("  ");
+            }
+        }
+        try stdout.writeAll(line);
+        first = false;
+    }
+}
+
+/// Truncate string to max bytes, respecting UTF-8 boundaries
+fn truncateUtf8(text: []const u8, max_bytes: usize) []const u8 {
+    if (text.len <= max_bytes) return text;
+
+    // Find a safe truncation point that doesn't split a UTF-8 sequence
+    var end = max_bytes;
+    while (end > 0 and (text[end] & 0xC0) == 0x80) {
+        // This byte is a continuation byte, back up
+        end -= 1;
+    }
+    return text[0..end];
 }
 
 fn processEscapes(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
