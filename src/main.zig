@@ -54,7 +54,7 @@ pub fn main() !void {
 
     // Handle version before anything else
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V")) {
-        try stdout.writeAll("jwz 0.5.4\n");
+        try stdout.writeAll("jwz 0.6.0\n");
         try stdout.flush();
         return;
     }
@@ -135,13 +135,16 @@ fn printUsage(stdout: anytype) !void {
         \\Post Options:
         \\  -c, --create            Create topic if it doesn't exist
         \\
+        \\Read/Thread Options:
+        \\  -s, --summary           Show first line of body only (truncated to 80 chars)
+        \\
         \\Identity Options (post/reply):
         \\  --as ID                 Sender ID (auto-generated if omitted)
         \\  --model MODEL           Model name (e.g., claude-3-opus)
         \\  --role ROLE             Role description (e.g., code-reviewer)
         \\
         \\Output Options:
-        \\  --json                  Output as JSON
+        \\  --json                  Output as JSON (thread includes depth field)
         \\  --quiet                 Output only ID
         \\
     );
@@ -515,12 +518,16 @@ fn cmdRead(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
     var topic_name: ?[]const u8 = null;
     var limit: u32 = 20;
     var json = false;
+    var summary = false;
 
     var i: usize = 0;
     while (i < args.len) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--json")) {
             json = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "-s")) {
+            summary = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--limit")) {
             const val = nextValue(args, &i, "limit");
@@ -536,7 +543,7 @@ fn cmdRead(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
     }
 
     if (topic_name == null) {
-        die("usage: jwz read <topic> [--limit N] [--json]", .{});
+        die("usage: jwz read <topic> [--limit N] [--summary] [--json]", .{});
     }
 
     const topic = try store.fetchTopic(topic_name.?);
@@ -572,8 +579,9 @@ fn cmdRead(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
         if (messages.len == 0) {
             try stdout.writeAll("No messages.\n");
         } else {
-            for (messages) |msg| {
-                try printMessageTree(allocator, stdout, store, msg, 0);
+            for (messages, 0..) |msg, idx| {
+                const is_last = (idx == messages.len - 1);
+                try printMessageTree(allocator, stdout, store, msg, 0, is_last, summary);
             }
         }
     }
@@ -629,12 +637,16 @@ fn cmdShow(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
 fn cmdThread(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
     var message_id: ?[]const u8 = null;
     var json = false;
+    var summary = false;
 
     var i: usize = 0;
     while (i < args.len) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--json")) {
             json = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "-s")) {
+            summary = true;
             i += 1;
         } else if (arg.len == 0 or arg[0] != '-') {
             message_id = arg;
@@ -645,7 +657,7 @@ fn cmdThread(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
     }
 
     if (message_id == null) {
-        die("usage: jwz thread <message-id> [--json]", .{});
+        die("usage: jwz thread <message-id> [--summary] [--json]", .{});
     }
 
     const messages = try store.fetchThread(message_id.?);
@@ -658,16 +670,35 @@ fn cmdThread(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
     }
 
     if (json) {
+        // Build depth map for JSON output
+        var depth_map = std.StringHashMap(u32).init(allocator);
+        defer depth_map.deinit();
+
         try stdout.writeByte('[');
         for (messages, 0..) |msg, idx| {
+            const depth: u32 = if (msg.parent_id) |pid| blk: {
+                const parent_depth = depth_map.get(pid) orelse 0;
+                break :blk parent_depth + 1;
+            } else 0;
+            try depth_map.put(msg.id, depth);
+
             if (idx > 0) try stdout.writeByte(',');
-            try writeMessageJson(stdout, msg);
+            try writeMessageJsonWithDepth(stdout, msg, depth);
         }
         try stdout.writeAll("]\n");
     } else {
-        // Build depth map for display
+        // Build depth map and last-sibling map for display
         var depth_map = std.StringHashMap(u32).init(allocator);
         defer depth_map.deinit();
+
+        // Find the last child for each parent (for correct tree symbols)
+        var last_child_map = std.StringHashMap([]const u8).init(allocator);
+        defer last_child_map.deinit();
+        for (messages) |msg| {
+            if (msg.parent_id) |pid| {
+                try last_child_map.put(pid, msg.id);
+            }
+        }
 
         for (messages) |msg| {
             const depth: u32 = if (msg.parent_id) |pid| blk: {
@@ -676,20 +707,35 @@ fn cmdThread(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
             } else 0;
             try depth_map.put(msg.id, depth);
 
+            // Determine if this is the last sibling
+            const is_last_sibling = if (msg.parent_id) |pid|
+                if (last_child_map.get(pid)) |last_id| std.mem.eql(u8, last_id, msg.id) else true
+            else
+                true;
+
             // Print with indentation
             var indent_i: u32 = 0;
             while (indent_i < depth) : (indent_i += 1) {
                 try stdout.writeAll("  ");
             }
             if (depth > 0) {
-                try stdout.writeAll("└─ ");
+                if (is_last_sibling) {
+                    try stdout.writeAll("└─ ");
+                } else {
+                    try stdout.writeAll("├─ ");
+                }
             } else {
                 try stdout.writeAll("▶ ");
             }
 
             try stdout.print("{s}", .{msg.id});
             if (msg.sender) |sender| {
-                try stdout.print(" by {s}", .{sender.name});
+                // Show role prominently if available, otherwise show name
+                if (sender.role) |role| {
+                    try stdout.print(" by {s}", .{role});
+                } else {
+                    try stdout.print(" by {s}", .{sender.name});
+                }
                 if (sender.model) |model| {
                     try stdout.print(" [{s}]", .{model});
                 }
@@ -699,12 +745,21 @@ fn cmdThread(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
             }
             try stdout.print(" {s}\n", .{formatTimeAgo(msg.created_at)});
 
-            // Print body with indentation
+            // Print body with indentation (truncated in summary mode)
             indent_i = 0;
             while (indent_i < depth + 1) : (indent_i += 1) {
                 try stdout.writeAll("  ");
             }
-            try stdout.print("{s}\n\n", .{msg.body});
+            if (summary) {
+                // Show first line only, truncated to 80 chars
+                const first_line = if (std.mem.indexOf(u8, msg.body, "\n")) |nl| msg.body[0..nl] else msg.body;
+                const truncated = if (first_line.len > 80) first_line[0..77] else first_line;
+                try stdout.print("{s}", .{truncated});
+                if (first_line.len > 80) try stdout.writeAll("...");
+                try stdout.writeAll("\n\n");
+            } else {
+                try stdout.print("{s}\n\n", .{msg.body});
+            }
         }
     }
 }
@@ -922,21 +977,30 @@ fn cmdBlobInfo(allocator: std.mem.Allocator, stdout: anytype, store: *Store, arg
 
 // ========== Helpers ==========
 
-fn printMessageTree(allocator: std.mem.Allocator, stdout: anytype, store: *Store, msg: zawinski.store.Message, depth: u32) !void {
+fn printMessageTree(allocator: std.mem.Allocator, stdout: anytype, store: *Store, msg: zawinski.store.Message, depth: u32, is_last: bool, summary: bool) !void {
     // Print indentation
     var indent_i: u32 = 0;
     while (indent_i < depth) : (indent_i += 1) {
         try stdout.writeAll("  ");
     }
     if (depth > 0) {
-        try stdout.writeAll("├─ ");
+        if (is_last) {
+            try stdout.writeAll("└─ ");
+        } else {
+            try stdout.writeAll("├─ ");
+        }
     } else {
         try stdout.writeAll("▶ ");
     }
 
     try stdout.print("{s}", .{msg.id});
     if (msg.sender) |sender| {
-        try stdout.print(" by {s}", .{sender.name});
+        // Show role prominently if available, otherwise show name
+        if (sender.role) |role| {
+            try stdout.print(" by {s}", .{role});
+        } else {
+            try stdout.print(" by {s}", .{sender.name});
+        }
         if (sender.model) |model| {
             try stdout.print(" [{s}]", .{model});
         }
@@ -946,15 +1010,24 @@ fn printMessageTree(allocator: std.mem.Allocator, stdout: anytype, store: *Store
     }
     try stdout.print(" {s}\n", .{formatTimeAgo(msg.created_at)});
 
-    // Print body
+    // Print body (truncated in summary mode)
     indent_i = 0;
     while (indent_i < depth + 1) : (indent_i += 1) {
         try stdout.writeAll("  ");
     }
-    try stdout.print("{s}\n\n", .{msg.body});
+    if (summary) {
+        // Show first line only, truncated to 80 chars
+        const first_line = if (std.mem.indexOf(u8, msg.body, "\n")) |nl| msg.body[0..nl] else msg.body;
+        const truncated = if (first_line.len > 80) first_line[0..77] else first_line;
+        try stdout.print("{s}", .{truncated});
+        if (first_line.len > 80) try stdout.writeAll("...");
+        try stdout.writeAll("\n\n");
+    } else {
+        try stdout.print("{s}\n\n", .{msg.body});
+    }
 
-    // Print replies (only first level for read command)
-    if (depth < 2) {
+    // Print replies (increased depth limit to 10 for better conversation visibility)
+    if (depth < 10) {
         const replies = try store.fetchReplies(msg.id);
         defer {
             for (replies) |*r| {
@@ -963,13 +1036,18 @@ fn printMessageTree(allocator: std.mem.Allocator, stdout: anytype, store: *Store
             }
             allocator.free(replies);
         }
-        for (replies) |reply| {
-            try printMessageTree(allocator, stdout, store, reply, depth + 1);
+        for (replies, 0..) |reply, idx| {
+            const reply_is_last = (idx == replies.len - 1);
+            try printMessageTree(allocator, stdout, store, reply, depth + 1, reply_is_last, summary);
         }
     }
 }
 
 fn writeMessageJson(stdout: anytype, msg: zawinski.store.Message) !void {
+    try writeMessageJsonWithDepth(stdout, msg, null);
+}
+
+fn writeMessageJsonWithDepth(stdout: anytype, msg: zawinski.store.Message, depth: ?u32) !void {
     // Build sender sub-object if present
     const SenderJson = struct {
         id: []const u8,
@@ -1005,6 +1083,7 @@ fn writeMessageJson(stdout: anytype, msg: zawinski.store.Message) !void {
         body: []const u8,
         created_at: i64,
         reply_count: i32,
+        depth: ?u32,
         sender: ?SenderJson,
         git: ?GitJson,
     }{
@@ -1014,6 +1093,7 @@ fn writeMessageJson(stdout: anytype, msg: zawinski.store.Message) !void {
         .body = msg.body,
         .created_at = msg.created_at,
         .reply_count = msg.reply_count,
+        .depth = depth,
         .sender = sender_json,
         .git = git_json,
     };

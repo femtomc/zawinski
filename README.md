@@ -236,9 +236,10 @@ With `--json`, messages include full sender and git context:
 
 | Flag | Applies to | Description |
 |------|------------|-------------|
-| `--json` | all | Output as JSON |
+| `--json` | all | Output as JSON (thread includes `depth` field) |
 | `--quiet` | post, reply, topic new | Output only the ID |
 | `-c, --create` | post | Create topic if it doesn't exist |
+| `-s, --summary` | read, thread | Show first line of body only (truncated to 80 chars) |
 | `--limit N` | read, search | Limit number of results |
 | `--topic NAME` | search | Filter search by topic |
 | `-d, --description` | topic new | Topic description |
