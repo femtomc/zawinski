@@ -54,7 +54,7 @@ pub fn main() !void {
 
     // Handle version before anything else
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V")) {
-        try stdout.writeAll("jwz 0.4.2\n");
+        try stdout.writeAll("jwz 0.5.1\n");
         try stdout.flush();
         return;
     }
@@ -131,6 +131,9 @@ fn printUsage(stdout: anytype) !void {
         \\
         \\Global Options:
         \\  --store PATH            Use store at PATH instead of auto-discovery
+        \\
+        \\Post Options:
+        \\  -c, --create            Create topic if it doesn't exist
         \\
         \\Identity Options (post/reply):
         \\  --as ID                 Sender ID (auto-generated if omitted)
@@ -304,6 +307,7 @@ fn cmdPost(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
     var body: ?[]const u8 = null;
     var json = false;
     var quiet = false;
+    var create_topic = false;
     var sender_id_arg: ?[]const u8 = null;
     var model_arg: ?[]const u8 = null;
     var role_arg: ?[]const u8 = null;
@@ -316,6 +320,9 @@ fn cmdPost(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
             i += 1;
         } else if (std.mem.eql(u8, arg, "--quiet")) {
             quiet = true;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--create")) {
+            create_topic = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--message")) {
             body = nextValue(args, &i, "message");
@@ -334,7 +341,17 @@ fn cmdPost(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
     }
 
     if (topic_name == null or body == null) {
-        die("usage: jwz post <topic> -m <message> [--as ID] [--model M] [--role R] [--json|--quiet]", .{});
+        die("usage: jwz post <topic> -m <message> [-c] [--as ID] [--model M] [--role R] [--json|--quiet]", .{});
+    }
+
+    // Auto-create topic if --create flag is set
+    if (create_topic) {
+        if (store.createTopic(topic_name.?, "")) |topic_id| {
+            allocator.free(topic_id);
+        } else |err| switch (err) {
+            StoreError.TopicExists => {}, // Already exists, that's fine
+            else => return err,
+        }
     }
 
     const processed_body = processEscapes(allocator, body.?) catch body.?;
@@ -1070,9 +1087,18 @@ fn die(comptime fmt: []const u8, args: anytype) noreturn {
 fn dieOnError(err: anyerror) noreturn {
     const msg: []const u8 = switch (err) {
         StoreError.StoreNotFound => "No store found. Run 'jwz init' or use --store.",
-        StoreError.TopicNotFound => "Topic not found.",
+        StoreError.TopicNotFound =>
+        \\Topic not found.
+        \\
+        \\The topic argument must be a topic NAME (e.g., 'tasks', 'research:myproject').
+        \\
+        \\To fix:
+        \\  1. List existing topics: jwz topic list
+        \\  2. Create a new topic:   jwz topic new <name>
+        \\  3. Or use --create/-c:   jwz post <topic> -c -m "message"
+        ,
         StoreError.TopicExists => "Topic already exists.",
-        StoreError.MessageNotFound => "Message not found.",
+        StoreError.MessageNotFound => "Message not found. Use 'jwz search <query>' to find messages.",
         StoreError.MessageIdAmbiguous => "Ambiguous message ID: matches multiple messages. Use more characters.",
         StoreError.InvalidMessageId => "Invalid message ID.",
         StoreError.ParentNotFound => "Parent message not found.",

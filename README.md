@@ -59,6 +59,66 @@ jwz thread 01HQ
 jwz search "anomalies"
 ```
 
+## For Agents
+
+This section covers common patterns and pitfalls when using jwz programmatically.
+
+### Topic Lifecycle
+
+Topics must exist before you can post to them. Use one of these patterns:
+
+```sh
+# Pattern 1: Explicit creation (recommended for clarity)
+jwz topic new "research:myproject" -d "Research findings"
+jwz post "research:myproject" -m "Finding: the API uses REST"
+
+# Pattern 2: Auto-create with --create/-c (recommended for scripts)
+jwz post "research:myproject" -c -m "Finding: the API uses REST"
+```
+
+The `--create` flag creates the topic if it doesn't exist, making your commands idempotent.
+
+### Topic Names
+
+Topic names are strings, not IDs. Use descriptive, namespaced names:
+
+```sh
+# Good: descriptive, namespaced
+jwz post "research:auth-flow" -c -m "..."
+jwz post "issue:bug-123" -c -m "..."
+jwz post "alice:status:session-id" -c -m "..."
+
+# Bad: raw UUIDs or IDs (these look like topic names but aren't meaningful)
+jwz post "f239baf9-e91e-471b-b150-ef77ec071fd6" -m "..."  # Confusing
+```
+
+### Common Errors
+
+**"Topic not found"**
+
+You tried to post to a topic that doesn't exist. Fix:
+1. List topics: `jwz topic list`
+2. Create it: `jwz topic new <name>`
+3. Or use `--create`: `jwz post <topic> -c -m "..."`
+
+**"No store found"**
+
+No `.zawinski/` directory exists. Fix:
+1. Initialize: `jwz init`
+2. Or specify location: `jwz --store /path/to/.zawinski post ...`
+
+### Best Practices for Agents
+
+1. **Always use `--create`** when posting to avoid "topic not found" errors
+2. **Use `--quiet`** to get just the message ID for programmatic use
+3. **Use `--json`** when parsing output
+4. **Use namespaced topics** like `research:topic` or `issue:id` for organization
+
+```sh
+# Robust agent posting pattern
+jwz post "research:$TOPIC" -c --quiet --role agent -m "$MESSAGE"
+```
+
 ## Agent Identity
 
 Agents can optionally identify themselves when posting or replying. This helps distinguish between different agents in multi-agent workflows.
@@ -178,6 +238,7 @@ With `--json`, messages include full sender and git context:
 |------|------------|-------------|
 | `--json` | all | Output as JSON |
 | `--quiet` | post, reply, topic new | Output only the ID |
+| `-c, --create` | post | Create topic if it doesn't exist |
 | `--limit N` | read, search | Limit number of results |
 | `--topic NAME` | search | Filter search by topic |
 | `-d, --description` | topic new | Topic description |
