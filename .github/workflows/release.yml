@@ -10,6 +10,8 @@ permissions:
 
 env:
   ZIG_VERSION: "0.15.2"
+  SITE_REPO: "evil-mind-evil-sword/evil-mind-evil-sword.github.io"
+  RELEASES_BASE: "https://evil-mind-evil-sword.github.io/releases"
 
 jobs:
   build:
@@ -69,6 +71,10 @@ jobs:
         with:
           path: dist
 
+      - name: Get version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
       - name: Prepare release assets
         run: |
           mkdir -p release
@@ -87,9 +93,9 @@ jobs:
           set -e
 
           # zawinski installer
-          # Usage: curl -fsSL https://github.com/femtomc/zawinski/releases/latest/download/install.sh | sh
+          # Usage: curl -fsSL https://evil-mind-evil-sword.github.io/releases/zawinski/install.sh | sh
 
-          REPO="femtomc/zawinski"
+          RELEASES_BASE="https://evil-mind-evil-sword.github.io/releases"
           INSTALL_DIR="${JWZ_INSTALL_DIR:-$HOME/.local/bin}"
 
           # Detect OS and architecture
@@ -110,14 +116,14 @@ jobs:
 
           BINARY="jwz-${OS}-${ARCH}"
 
-          # Get version
+          # Get version from manifest
           if [ -n "$JWZ_VERSION" ]; then
             VERSION="$JWZ_VERSION"
           else
-            VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+            VERSION=$(curl -fsSL "${RELEASES_BASE}/manifest.json" | grep -o '"zawinski"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
           fi
 
-          URL="https://github.com/${REPO}/releases/download/${VERSION}/${BINARY}"
+          URL="${RELEASES_BASE}/zawinski/${VERSION}/${BINARY}"
 
           echo "Installing jwz ${VERSION} for ${OS}/${ARCH}..."
 
@@ -140,9 +146,33 @@ jobs:
           EOF
           chmod +x release/install.sh
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - name: Checkout site repo
+        uses: actions/checkout@v4
         with:
-          files: |
-            release/*
-          generate_release_notes: true
+          repository: ${{ env.SITE_REPO }}
+          path: site
+          token: ${{ secrets.SITE_DEPLOY_TOKEN }}
+
+      - name: Deploy to site
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p "site/releases/zawinski/${VERSION}"
+          cp release/* "site/releases/zawinski/${VERSION}/"
+          cp release/install.sh "site/releases/zawinski/install.sh"
+
+          # Update manifest
+          cd site/releases
+          if [ -f manifest.json ]; then
+            jq --arg v "$VERSION" '.zawinski = $v' manifest.json > manifest.tmp && mv manifest.tmp manifest.json
+          else
+            echo "{\"zawinski\": \"$VERSION\"}" > manifest.json
+          fi
+
+      - name: Commit and push to site
+        run: |
+          cd site
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Release zawinski ${{ steps.version.outputs.version }}" || exit 0
+          git push
