@@ -1310,7 +1310,7 @@ fn walkUpForStore(allocator: std.mem.Allocator) ![]const u8 {
         // Try parent directory
         const parent = std.fs.path.dirname(current);
         if (parent == null or std.mem.eql(u8, parent.?, current)) {
-            allocator.free(current);
+            // errdefer will free current
             return StoreError.StoreNotFound;
         }
         const new_current = try allocator.dupe(u8, parent.?);
