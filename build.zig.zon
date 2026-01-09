@@ -1,7 +1,7 @@
 .{
     .name = .jwz,
     .version = "26.1.16",
-    .fingerprint = 0xc85f008c9498eb70,
+    .fingerprint = 0x6aafe0f7b5d8b58a,
     .minimum_zig_version = "0.15.2",
 
     .dependencies = .{},
