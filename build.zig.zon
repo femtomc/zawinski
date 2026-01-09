@@ -1,5 +1,5 @@
 .{
-    .name = .zawinski,
+    .name = .jwz,
     .version = "26.1.15",
     .fingerprint = 0xc85f008c9498eb70,
     .minimum_zig_version = "0.15.2",

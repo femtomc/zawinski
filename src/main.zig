@@ -1,10 +1,10 @@
 const std = @import("std");
-const zawinski = @import("zawinski");
+const jwz = @import("jwz");
 
-const Store = zawinski.store.Store;
-const StoreError = zawinski.store.StoreError;
-const Sender = zawinski.store.Sender;
-const GitMeta = zawinski.store.GitMeta;
+const Store = jwz.store.Store;
+const StoreError = jwz.store.StoreError;
+const Sender = jwz.store.Sender;
+const GitMeta = jwz.store.GitMeta;
 const CreateMessageOptions = Store.CreateMessageOptions;
 
 pub fn main() !void {
@@ -80,7 +80,7 @@ pub fn main() !void {
     const store_dir = if (explicit_store) |sp|
         resolveStorePath(allocator, sp) catch |err| dieOnError(err)
     else blk: {
-        break :blk zawinski.store.discoverStoreDir(allocator) catch |err| {
+        break :blk jwz.store.discoverStoreDir(allocator) catch |err| {
             if (err == StoreError.StoreNotFound and std.mem.eql(u8, cmd, "post")) {
                 // Auto-initialize store in cwd (silent for scripting)
                 var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -396,14 +396,14 @@ fn cmdPost(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
         };
         options.sender = Sender{
             .id = sender_id,
-            .name = zawinski.names.fromUlid(sender_id),
+            .name = jwz.names.fromUlid(sender_id),
             .model = model_arg,
             .role = role_arg,
         };
     }
 
     // Capture git metadata
-    if (zawinski.git.capture(allocator)) |git_info| {
+    if (jwz.git.capture(allocator)) |git_info| {
         options.git = GitMeta{
             .oid = git_info.oid,
             .head = git_info.head,
@@ -477,10 +477,10 @@ fn cmdReply(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: 
     }
 
     // Get topic name
-    const stmt = try zawinski.sqlite.prepare(store.db, "SELECT name FROM topics WHERE id = ?;");
-    defer zawinski.sqlite.finalize(stmt);
-    try zawinski.sqlite.bindText(stmt, 1, parent.topic_id);
-    const topic_name = if (try zawinski.sqlite.step(stmt)) zawinski.sqlite.columnText(stmt, 0) else return StoreError.TopicNotFound;
+    const stmt = try jwz.sqlite.prepare(store.db, "SELECT name FROM topics WHERE id = ?;");
+    defer jwz.sqlite.finalize(stmt);
+    try jwz.sqlite.bindText(stmt, 1, parent.topic_id);
+    const topic_name = if (try jwz.sqlite.step(stmt)) jwz.sqlite.columnText(stmt, 0) else return StoreError.TopicNotFound;
 
     const processed_body = processEscapes(allocator, body.?) catch body.?;
     defer if (processed_body.ptr != body.?.ptr) allocator.free(processed_body);
@@ -497,14 +497,14 @@ fn cmdReply(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: 
         };
         options.sender = Sender{
             .id = sender_id,
-            .name = zawinski.names.fromUlid(sender_id),
+            .name = jwz.names.fromUlid(sender_id),
             .model = model_arg,
             .role = role_arg,
         };
     }
 
     // Capture git metadata
-    if (zawinski.git.capture(allocator)) |git_info| {
+    if (jwz.git.capture(allocator)) |git_info| {
         options.git = GitMeta{
             .oid = git_info.oid,
             .head = git_info.head,
@@ -1061,11 +1061,11 @@ fn cmdMigrate(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args
         existing_topics.deinit();
     }
     {
-        const stmt = try zawinski.sqlite.prepare(store.db, "SELECT name, id FROM topics;");
-        defer zawinski.sqlite.finalize(stmt);
-        while (try zawinski.sqlite.step(stmt)) {
-            const name = zawinski.sqlite.columnText(stmt, 0);
-            const id = zawinski.sqlite.columnText(stmt, 1);
+        const stmt = try jwz.sqlite.prepare(store.db, "SELECT name, id FROM topics;");
+        defer jwz.sqlite.finalize(stmt);
+        while (try jwz.sqlite.step(stmt)) {
+            const name = jwz.sqlite.columnText(stmt, 0);
+            const id = jwz.sqlite.columnText(stmt, 1);
             const name_copy = try allocator.dupe(u8, name);
             const id_copy = try allocator.dupe(u8, id);
             try existing_topics.put(name_copy, id_copy);
@@ -1079,10 +1079,10 @@ fn cmdMigrate(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args
         existing_messages.deinit();
     }
     {
-        const stmt = try zawinski.sqlite.prepare(store.db, "SELECT id FROM messages;");
-        defer zawinski.sqlite.finalize(stmt);
-        while (try zawinski.sqlite.step(stmt)) {
-            const id = zawinski.sqlite.columnText(stmt, 0);
+        const stmt = try jwz.sqlite.prepare(store.db, "SELECT id FROM messages;");
+        defer jwz.sqlite.finalize(stmt);
+        while (try jwz.sqlite.step(stmt)) {
+            const id = jwz.sqlite.columnText(stmt, 0);
             const id_copy = try allocator.dupe(u8, id);
             try existing_messages.put(id_copy, {});
         }
@@ -1239,7 +1239,7 @@ fn cmdMigrate(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args
 
 // ========== Helpers ==========
 
-fn printMessageTree(allocator: std.mem.Allocator, stdout: anytype, store: *Store, msg: zawinski.store.Message, depth: u32, is_last: bool, summary: bool) !void {
+fn printMessageTree(allocator: std.mem.Allocator, stdout: anytype, store: *Store, msg: jwz.store.Message, depth: u32, is_last: bool, summary: bool) !void {
     // Print indentation
     var indent_i: u32 = 0;
     while (indent_i < depth) : (indent_i += 1) {
@@ -1307,7 +1307,7 @@ fn printMessageTree(allocator: std.mem.Allocator, stdout: anytype, store: *Store
     }
 }
 
-fn writeMessageJson(stdout: anytype, msg: zawinski.store.Message) !void {
+fn writeMessageJson(stdout: anytype, msg: jwz.store.Message) !void {
     // Use separate struct without depth field for show/search (depth not applicable)
     const SenderJson = struct {
         id: []const u8,
@@ -1357,7 +1357,7 @@ fn writeMessageJson(stdout: anytype, msg: zawinski.store.Message) !void {
     try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
 }
 
-fn writeMessageJsonWithDepth(stdout: anytype, msg: zawinski.store.Message, depth: ?u32) !void {
+fn writeMessageJsonWithDepth(stdout: anytype, msg: jwz.store.Message, depth: ?u32) !void {
     // Build sender sub-object if present
     const SenderJson = struct {
         id: []const u8,
@@ -1549,9 +1549,9 @@ fn dieOnError(err: anyerror) noreturn {
         StoreError.DatabaseBusy => "Database busy. Please retry.",
         StoreError.EmptyTopicName => "Topic name cannot be empty.",
         StoreError.EmptyMessageBody => "Message body cannot be empty.",
-        zawinski.sqlite.Error.SqliteBusy => "Database busy. Please retry.",
-        zawinski.sqlite.Error.SqliteError => "Database error.",
-        zawinski.sqlite.Error.SqliteStepError => "Database query error.",
+        jwz.sqlite.Error.SqliteBusy => "Database busy. Please retry.",
+        jwz.sqlite.Error.SqliteError => "Database error.",
+        jwz.sqlite.Error.SqliteStepError => "Database query error.",
         else => {
             std.debug.print("error: {s}\n", .{@errorName(err)});
             std.process.exit(1);

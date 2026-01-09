@@ -92,8 +92,8 @@ jobs:
           #!/bin/sh
           set -e
 
-          # zawinski installer
-          # Usage: curl -fsSL https://evil-mind-evil-sword.github.io/releases/zawinski/install.sh | sh
+          # jwz installer
+          # Usage: curl -fsSL https://evil-mind-evil-sword.github.io/releases/jwz/install.sh | sh
 
           RELEASES_BASE="https://evil-mind-evil-sword.github.io/releases"
           INSTALL_DIR="${JWZ_INSTALL_DIR:-$HOME/.local/bin}"
@@ -120,10 +120,10 @@ jobs:
           if [ -n "$JWZ_VERSION" ]; then
             VERSION="$JWZ_VERSION"
           else
-            VERSION=$(curl -fsSL "${RELEASES_BASE}/manifest.json" | grep -o '"zawinski"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
+            VERSION=$(curl -fsSL "${RELEASES_BASE}/manifest.json" | grep -o '"jwz"[[:space:]]*:[[:space:]]*{[^}]*"version"[[:space:]]*:[[:space:]]*"[^"]*"' | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
           fi
 
-          URL="${RELEASES_BASE}/zawinski/${VERSION}/${BINARY}"
+          URL="${RELEASES_BASE}/jwz/${VERSION}/${BINARY}"
 
           echo "Installing jwz ${VERSION} for ${OS}/${ARCH}..."
 
@@ -158,20 +158,20 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}"
 
           # Prune old versions (keep only latest)
-          rm -rf site/releases/zawinski/v*
+          rm -rf site/releases/jwz/v*
 
           # Deploy new version
-          mkdir -p "site/releases/zawinski/${VERSION}"
-          cp release/* "site/releases/zawinski/${VERSION}/"
-          cp release/install.sh "site/releases/zawinski/install.sh"
+          mkdir -p "site/releases/jwz/${VERSION}"
+          cp release/* "site/releases/jwz/${VERSION}/"
+          cp release/install.sh "site/releases/jwz/install.sh"
 
           # Update manifest with version and binary sizes
           cd site/releases
-          SIZES=$(cd zawinski/${VERSION} && for f in jwz-*; do echo "\"$f\": $(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")"; done | paste -sd, -)
+          SIZES=$(cd jwz/${VERSION} && for f in jwz-*; do echo "\"$f\": $(stat -c%s "$f" 2>/dev/null || stat -f%z "$f")"; done | paste -sd, -)
           if [ -f manifest.json ]; then
-            jq --arg v "$VERSION" --argjson sizes "{$SIZES}" '.zawinski = {version: $v, sizes: $sizes}' manifest.json > manifest.tmp && mv manifest.tmp manifest.json
+            jq --arg v "$VERSION" --argjson sizes "{$SIZES}" '.jwz = {version: $v, sizes: $sizes}' manifest.json > manifest.tmp && mv manifest.tmp manifest.json
           else
-            echo "{\"zawinski\": {\"version\": \"$VERSION\", \"sizes\": {$SIZES}}}" > manifest.json
+            echo "{\"jwz\": {\"version\": \"$VERSION\", \"sizes\": {$SIZES}}}" > manifest.json
           fi
 
       - name: Commit and push to site
@@ -180,5 +180,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -m "Release zawinski ${{ steps.version.outputs.version }}" || exit 0
+          git commit -m "Release jwz ${{ steps.version.outputs.version }}" || exit 0
           git push

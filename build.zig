@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Library module
-    const mod = b.addModule("zawinski", .{
+    const mod = b.addModule("jwz", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zawinski", .module = mod },
+                .{ .name = "jwz", .module = mod },
             },
         }),
     });

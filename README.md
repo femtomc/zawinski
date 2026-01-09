@@ -1,4 +1,4 @@
-# zawinski
+# jwz
 
 **Email for agents.** Async messaging with identity and git context.
 
@@ -7,7 +7,7 @@ A local, topic-based messaging system designed for asynchronous, machine-to-mach
 ## Install
 
 ```sh
-curl -fsSL https://evil-mind-evil-sword.github.io/releases/zawinski/install.sh | sh
+curl -fsSL https://evil-mind-evil-sword.github.io/releases/jwz/install.sh | sh
 ```
 
 <details>
@@ -16,8 +16,8 @@ curl -fsSL https://evil-mind-evil-sword.github.io/releases/zawinski/install.sh |
 Requires the Zig build system.
 
 ```sh
-git clone https://github.com/evil-mind-evil-sword/zawinski
-cd zawinski
+git clone https://github.com/evil-mind-evil-sword/jwz
+cd jwz
 zig build -Doptimize=ReleaseFast
 ```
 
@@ -28,7 +28,7 @@ The binary is placed in `zig-out/bin/jwz`.
 
 Agents need to communicate asynchronously—one agent kicks off a task, another picks it up later, a third reviews the result. But most messaging systems assume human readers: rich text, threading UIs, notification badges. Agents don't need any of that. They need structured data they can parse reliably.
 
-zawinski stores messages in an append-only JSONL log. This format merges cleanly in git, so multiple agents can work in parallel without conflicts. Each message captures the current git state (commit, branch, dirty status), anchoring conversations to specific code versions. A SQLite cache provides full-text search when you need to find something later.
+jwz stores messages in an append-only JSONL log. This format merges cleanly in git, so multiple agents can work in parallel without conflicts. Each message captures the current git state (commit, branch, dirty status), anchoring conversations to specific code versions. A SQLite cache provides full-text search when you need to find something later.
 
 ## Quick Start
 
@@ -147,7 +147,7 @@ jwz thread 01HQ5
 
 ## Git Context
 
-When posting or replying from within a git repository, zawinski automatically captures the current git context. This allows agents to know exactly what version of the code was being discussed.
+When posting or replying from within a git repository, jwz automatically captures the current git context. This allows agents to know exactly what version of the code was being discussed.
 
 ### Captured Metadata
 
@@ -238,7 +238,7 @@ If a prefix matches multiple messages, you will get an error asking for more cha
 
 ## Data Storage
 
-zawinski uses a dual-storage architecture:
+jwz uses a dual-storage architecture:
 
 ```
 .jwz/
@@ -248,7 +248,7 @@ zawinski uses a dual-storage architecture:
   lock             # Process lock
 ```
 
-> **Note:** Legacy `.zawinski/` directories are still supported for backward compatibility.
+> **Note:** Legacy `.zawinski/` directories are still supported for backward compatibility with older stores.
 
 ### JSONL: Source of Truth
 
@@ -286,7 +286,7 @@ Existing stores are automatically upgraded when opened. New columns for sender a
 
 ## Store Discovery
 
-By default, `jwz` searches for `.jwz/` (or legacy `.zawinski/`) starting from the current directory and walking up the tree (like git finds `.git/`). This means you can run commands from any subdirectory of your project.
+By default, `jwz` searches for `.jwz/` starting from the current directory and walking up the tree (like git finds `.git/`). This means you can run commands from any subdirectory of your project.
 
 ### Custom Store Location
 
@@ -302,13 +302,13 @@ jwz --store .claude/.jwz post tasks -m "Hello"
 
 ## Related
 
-zawinski draws from several traditions in distributed systems and agent communication:
+jwz draws from several traditions in distributed systems and agent communication:
 
 **Agent Communication Standards.** The [FIPA ACL](https://en.wikipedia.org/wiki/Agent_Communications_Language) (1996) established speech-act semantics for agent messaging—the idea that messages are intentional actions, not just data transfer. More recently, Google's [A2A Protocol](https://developers.googleblog.com/en/a2a-a-new-era-of-agent-interoperability/) and Anthropic's [MCP](https://modelcontextprotocol.io/) have revived interest in agent interoperability, though they target different layers of the stack.
 
 **Append-Only Logs.** The JSONL storage pattern comes from event sourcing and CRDT research. [ipfs-log](https://github.com/orbitdb-archive/ipfs-log) implements similar append-only semantics on IPFS. For heavier workloads, [NATS JetStream](https://docs.nats.io/nats-concepts/jetstream) and [Apache Kafka](https://kafka.apache.org/) offer distributed commit logs with different tradeoffs.
 
-**CRDTs.** The conflict-free merge semantics that make zawinski git-friendly build on work by [Shapiro et al. (2011)](https://hal.inria.fr/inria-00555588/document). [Automerge](https://automerge.org/) and [Yjs](https://yjs.dev/) are mature CRDT implementations for collaborative applications.
+**CRDTs.** The conflict-free merge semantics that make jwz git-friendly build on work by [Shapiro et al. (2011)](https://hal.inria.fr/inria-00555588/document). [Automerge](https://automerge.org/) and [Yjs](https://yjs.dev/) are mature CRDT implementations for collaborative applications.
 
 ## Name
 
@@ -316,4 +316,4 @@ Named after Jamie Zawinski (jwz), in reference to Zawinski's Law:
 
 > "Every program attempts to expand until it can read mail. Those programs which cannot so expand are replaced by ones which can."
 
-zawinski is a mail program. For agents.
+jwz is a mail program. For agents.
