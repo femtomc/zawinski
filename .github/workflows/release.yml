@@ -120,7 +120,10 @@ jobs:
           if [ -n "$JWZ_VERSION" ]; then
             VERSION="$JWZ_VERSION"
           else
-            VERSION=$(curl -fsSL "${RELEASES_BASE}/manifest.json" | grep -o '"jwz"[[:space:]]*:[[:space:]]*{[^}]*"version"[[:space:]]*:[[:space:]]*"[^"]*"' | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
+            VERSION=$(curl -fsSL "${RELEASES_BASE}/manifest.json" 2>/dev/null | tr -d '\n\r\t ' | grep -oE '"jwz":\{"version":"[^"]*"' | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+            if [ -z "$VERSION" ]; then
+              VERSION="__FALLBACK_VERSION__"
+            fi
           fi
 
           URL="${RELEASES_BASE}/jwz/${VERSION}/${BINARY}"
@@ -145,6 +148,8 @@ jobs:
           echo "  jwz topic new general -d 'General discussion'"
           EOF
           chmod +x release/install.sh
+          # Replace placeholder with actual release version
+          sed -i "s/__FALLBACK_VERSION__/${{ steps.version.outputs.version }}/g" release/install.sh
 
       - name: Checkout site repo
         uses: actions/checkout@v4
