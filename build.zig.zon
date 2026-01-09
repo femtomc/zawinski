@@ -1,6 +1,6 @@
 .{
     .name = .jwz,
-    .version = "26.1.17",
+    .version = "26.1.18",
     .fingerprint = 0x6aafe0f7b5d8b58a,
     .minimum_zig_version = "0.15.2",
 
