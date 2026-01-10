@@ -599,7 +599,9 @@ fn cmdShow(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, arg
             try output.print(" ({d} replies)", .{msg.reply_count});
         }
         try output.print(" {s}\n", .{formatTimeAgo(msg.created_at)});
-        try output.print("  {s}\n", .{msg.body});
+        try output.write("  ");
+        try output.write(msg.body);
+        try output.write("\n");
     }
 }
 
