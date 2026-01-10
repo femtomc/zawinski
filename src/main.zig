@@ -26,10 +26,7 @@ pub fn main() !void {
     const all_args = try args_list.toOwnedSlice(allocator);
     defer allocator.free(all_args);
 
-    var stdout_buf: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buf);
-    const stdout = &stdout_writer.interface;
-    defer stdout.flush() catch {};
+    var output = cli.Output.initWithAllocator(allocator);
 
     // Parse global --store flag (before command)
     var explicit_store: ?[]const u8 = null;
@@ -48,8 +45,7 @@ pub fn main() !void {
     }
 
     if (args.items.len < 2) {
-        try printUsage(stdout);
-        try stdout.flush();
+        try printUsage(&output);
         return;
     }
 
@@ -57,24 +53,21 @@ pub fn main() !void {
 
     // Handle version before anything else
     if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-V")) {
-        try stdout.print("jwz {s}\n", .{build_options.version});
-        try stdout.flush();
+        try output.print("jwz {s}\n", .{build_options.version});
         return;
     }
 
     // Handle help
     if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
-        try printUsage(stdout);
-        try stdout.flush();
+        try printUsage(&output);
         return;
     }
 
     // Handle init before store discovery
     if (std.mem.eql(u8, cmd, "init")) {
-        cmdInit(allocator, stdout, args.items[2..], explicit_store) catch |err| {
+        cmdInit(allocator, &output, args.items[2..], explicit_store) catch |err| {
             dieOnError(err);
         };
-        try stdout.flush();
         return;
     }
 
@@ -111,23 +104,23 @@ pub fn main() !void {
 
     const result: anyerror!void = blk: {
         if (std.mem.eql(u8, cmd, "topic")) {
-            break :blk cmdTopic(allocator, stdout, &store, args.items[2..]);
+            break :blk cmdTopic(allocator, &output, &store, args.items[2..]);
         } else if (std.mem.eql(u8, cmd, "post")) {
-            break :blk cmdPost(allocator, stdout, &store, args.items[2..]);
+            break :blk cmdPost(allocator, &output, &store, args.items[2..]);
         } else if (std.mem.eql(u8, cmd, "reply")) {
-            break :blk cmdReply(allocator, stdout, &store, args.items[2..]);
+            break :blk cmdReply(allocator, &output, &store, args.items[2..]);
         } else if (std.mem.eql(u8, cmd, "read") or std.mem.eql(u8, cmd, "list")) {
-            break :blk cmdRead(allocator, stdout, &store, args.items[2..]);
+            break :blk cmdRead(allocator, &output, &store, args.items[2..]);
         } else if (std.mem.eql(u8, cmd, "show")) {
-            break :blk cmdShow(allocator, stdout, &store, args.items[2..]);
+            break :blk cmdShow(allocator, &output, &store, args.items[2..]);
         } else if (std.mem.eql(u8, cmd, "thread")) {
-            break :blk cmdThread(allocator, stdout, &store, args.items[2..]);
+            break :blk cmdThread(allocator, &output, &store, args.items[2..]);
         } else if (std.mem.eql(u8, cmd, "search")) {
-            break :blk cmdSearch(allocator, stdout, &store, args.items[2..]);
+            break :blk cmdSearch(allocator, &output, &store, args.items[2..]);
         } else if (std.mem.eql(u8, cmd, "blob")) {
-            break :blk cmdBlob(allocator, stdout, &store, args.items[2..]);
+            break :blk cmdBlob(allocator, &output, &store, args.items[2..]);
         } else if (std.mem.eql(u8, cmd, "migrate")) {
-            break :blk cmdMigrate(allocator, stdout, &store, args.items[2..]);
+            break :blk cmdMigrate(allocator, &output, &store, args.items[2..]);
         } else {
             die("unknown command: {s}", .{cmd});
         }
@@ -138,8 +131,8 @@ pub fn main() !void {
     };
 }
 
-fn printUsage(stdout: anytype) !void {
-    try stdout.writeAll(
+fn printUsage(output: *cli.Output) !void {
+    try output.write(
         \\Usage: jwz [--store PATH] <command> [options]
         \\
         \\Commands:
@@ -178,16 +171,17 @@ fn printUsage(stdout: anytype) !void {
     );
 }
 
-fn cmdInit(allocator: std.mem.Allocator, stdout: anytype, args: []const []const u8, explicit_store: ?[]const u8) !void {
+fn cmdInit(allocator: std.mem.Allocator, output: *cli.Output, args: []const []const u8, explicit_store: ?[]const u8) !void {
     var json = false;
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--json")) {
+        if (cli.matchesFlag(arg, null, "json")) {
             json = true;
         }
-        i += 1;
     }
+
+    output.setModeFromFlags(json, false, false, false);
 
     // Determine store directory
     const store_dir = if (explicit_store) |sp|
@@ -217,16 +211,10 @@ fn cmdInit(allocator: std.mem.Allocator, stdout: anytype, args: []const []const 
     var store = try Store.open(allocator, store_dir);
     defer store.deinit();
 
-    if (json) {
-        const record = .{ .store = store_dir };
-        try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
-        try stdout.writeByte('\n');
-    } else {
-        try stdout.print("Initialized store in {s}\n", .{store_dir});
-    }
+    try output.record(.{ .store = store_dir });
 }
 
-fn cmdTopic(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdTopic(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     if (args.len < 1) {
         die("usage: jwz topic <new|list> [options]", .{});
     }
@@ -234,34 +222,31 @@ fn cmdTopic(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: 
     const subcmd = args[0];
 
     if (std.mem.eql(u8, subcmd, "new")) {
-        try cmdTopicNew(allocator, stdout, store, args[1..]);
+        try cmdTopicNew(allocator, output, store, args[1..]);
     } else if (std.mem.eql(u8, subcmd, "list")) {
-        try cmdTopicList(allocator, stdout, store, args[1..]);
+        try cmdTopicList(allocator, output, store, args[1..]);
     } else {
         die("unknown topic subcommand: {s}", .{subcmd});
     }
 }
 
-fn cmdTopicNew(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdTopicNew(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     var name: ?[]const u8 = null;
     var description: []const u8 = "";
     var json = false;
     var quiet = false;
 
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--json")) {
+        if (cli.matchesFlag(arg, null, "json")) {
             json = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--quiet")) {
+        } else if (cli.matchesFlag(arg, null, "quiet")) {
             quiet = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--description")) {
+        } else if (cli.matchesFlag(arg, 'd', "description")) {
             description = nextValue(args, &i, "description");
         } else if (arg.len == 0 or arg[0] != '-') {
             name = arg;
-            i += 1;
         } else {
             die("unknown option: {s}", .{arg});
         }
@@ -271,30 +256,25 @@ fn cmdTopicNew(allocator: std.mem.Allocator, stdout: anytype, store: *Store, arg
         die("usage: jwz topic new <name> [-d description] [--json|--quiet]", .{});
     }
 
+    output.setModeFromFlags(json, quiet, false, false);
+
     const id = try store.createTopic(name.?, description);
     defer allocator.free(id);
 
-    if (quiet) {
-        try stdout.print("{s}\n", .{id});
-    } else if (json) {
-        const record = .{ .id = id, .name = name.?, .description = description };
-        try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
-        try stdout.writeByte('\n');
-    } else {
-        try stdout.print("Created topic: {s}\n", .{name.?});
-    }
+    try output.record(.{ .id = id, .name = name.?, .description = description });
 }
 
-fn cmdTopicList(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdTopicList(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     var json = false;
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--json")) {
+        if (cli.matchesFlag(arg, null, "json")) {
             json = true;
         }
-        i += 1;
     }
+
+    output.setModeFromFlags(json, false, false, false);
 
     const topics = try store.listTopics();
     defer {
@@ -305,35 +285,22 @@ fn cmdTopicList(allocator: std.mem.Allocator, stdout: anytype, store: *Store, ar
         allocator.free(topics);
     }
 
-    if (json) {
-        try stdout.writeByte('[');
-        for (topics, 0..) |topic, idx| {
-            if (idx > 0) try stdout.writeByte(',');
-            const record = .{
-                .id = topic.id,
-                .name = topic.name,
-                .description = topic.description,
-                .created_at = topic.created_at,
-            };
-            try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
-        }
-        try stdout.writeAll("]\n");
+    // Build records for output
+    const Record = struct { id: []const u8, name: []const u8, description: []const u8, created_at: i64 };
+    var records = try allocator.alloc(Record, topics.len);
+    defer allocator.free(records);
+    for (topics, 0..) |topic, idx| {
+        records[idx] = .{ .id = topic.id, .name = topic.name, .description = topic.description, .created_at = topic.created_at };
+    }
+
+    if (topics.len == 0 and output.mode == .human) {
+        try output.info("No topics found.", .{});
     } else {
-        if (topics.len == 0) {
-            try stdout.writeAll("No topics found.\n");
-        } else {
-            for (topics) |topic| {
-                try stdout.print("{s}", .{topic.name});
-                if (topic.description.len > 0) {
-                    try stdout.print(" - {s}", .{topic.description});
-                }
-                try stdout.writeByte('\n');
-            }
-        }
+        try output.list(Record, records);
     }
 }
 
-fn cmdPost(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdPost(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     var topic_name: ?[]const u8 = null;
     var body: ?[]const u8 = null;
     var json = false;
@@ -343,25 +310,22 @@ fn cmdPost(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
     var role_arg: ?[]const u8 = null;
 
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--json")) {
+        if (cli.matchesFlag(arg, null, "json")) {
             json = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--quiet")) {
+        } else if (cli.matchesFlag(arg, null, "quiet")) {
             quiet = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--message")) {
+        } else if (cli.matchesFlag(arg, 'm', "message")) {
             body = nextValue(args, &i, "message");
-        } else if (std.mem.eql(u8, arg, "--as")) {
+        } else if (cli.matchesFlag(arg, null, "as")) {
             sender_id_arg = nextValue(args, &i, "as");
-        } else if (std.mem.eql(u8, arg, "--model")) {
+        } else if (cli.matchesFlag(arg, null, "model")) {
             model_arg = nextValue(args, &i, "model");
-        } else if (std.mem.eql(u8, arg, "--role")) {
+        } else if (cli.matchesFlag(arg, null, "role")) {
             role_arg = nextValue(args, &i, "role");
         } else if (arg.len == 0 or arg[0] != '-') {
             topic_name = arg;
-            i += 1;
         } else {
             die("unknown option: {s}", .{arg});
         }
@@ -370,6 +334,8 @@ fn cmdPost(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
     if (topic_name == null or body == null) {
         die("usage: jwz post <topic> -m <message> [--as ID] [--model M] [--role R] [--json|--quiet]", .{});
     }
+
+    output.setModeFromFlags(json, quiet, false, false);
 
     // Auto-create topic if it doesn't exist
     if (store.createTopic(topic_name.?, "")) |topic_id| {
@@ -423,18 +389,10 @@ fn cmdPost(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
     const id = try store.createMessage(topic_name.?, null, processed_body, options);
     defer allocator.free(id);
 
-    if (quiet) {
-        try stdout.print("{s}\n", .{id});
-    } else if (json) {
-        const record = .{ .id = id, .topic = topic_name.? };
-        try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
-        try stdout.writeByte('\n');
-    } else {
-        try stdout.print("Posted: {s}\n", .{id});
-    }
+    try output.record(.{ .id = id, .topic = topic_name.? });
 }
 
-fn cmdReply(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdReply(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     var parent_id: ?[]const u8 = null;
     var body: ?[]const u8 = null;
     var json = false;
@@ -444,25 +402,22 @@ fn cmdReply(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: 
     var role_arg: ?[]const u8 = null;
 
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--json")) {
+        if (cli.matchesFlag(arg, null, "json")) {
             json = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--quiet")) {
+        } else if (cli.matchesFlag(arg, null, "quiet")) {
             quiet = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--message")) {
+        } else if (cli.matchesFlag(arg, 'm', "message")) {
             body = nextValue(args, &i, "message");
-        } else if (std.mem.eql(u8, arg, "--as")) {
+        } else if (cli.matchesFlag(arg, null, "as")) {
             sender_id_arg = nextValue(args, &i, "as");
-        } else if (std.mem.eql(u8, arg, "--model")) {
+        } else if (cli.matchesFlag(arg, null, "model")) {
             model_arg = nextValue(args, &i, "model");
-        } else if (std.mem.eql(u8, arg, "--role")) {
+        } else if (cli.matchesFlag(arg, null, "role")) {
             role_arg = nextValue(args, &i, "role");
         } else if (arg.len == 0 or arg[0] != '-') {
             parent_id = arg;
-            i += 1;
         } else {
             die("unknown option: {s}", .{arg});
         }
@@ -471,6 +426,8 @@ fn cmdReply(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: 
     if (parent_id == null or body == null) {
         die("usage: jwz reply <message-id> -m <message> [--as ID] [--model M] [--role R] [--json|--quiet]", .{});
     }
+
+    output.setModeFromFlags(json, quiet, false, false);
 
     // Fetch parent to get topic
     const parent = try store.fetchMessage(parent_id.?);
@@ -524,40 +481,29 @@ fn cmdReply(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: 
     const id = try store.createMessage(topic_name, parent.id, processed_body, options);
     defer allocator.free(id);
 
-    if (quiet) {
-        try stdout.print("{s}\n", .{id});
-    } else if (json) {
-        const record = .{ .id = id, .parent_id = parent.id };
-        try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
-        try stdout.writeByte('\n');
-    } else {
-        try stdout.print("Replied: {s}\n", .{id});
-    }
+    try output.record(.{ .id = id, .parent_id = parent.id });
 }
 
-fn cmdRead(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdRead(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     var topic_name: ?[]const u8 = null;
     var limit: u32 = 20;
     var json = false;
     var summary = false;
 
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--json")) {
+        if (cli.matchesFlag(arg, null, "json")) {
             json = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "-s")) {
+        } else if (cli.matchesFlag(arg, 's', "summary")) {
             summary = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--limit")) {
+        } else if (cli.matchesFlag(arg, null, "limit")) {
             const val = nextValue(args, &i, "limit");
             limit = std.fmt.parseInt(u32, val, 10) catch {
                 die("invalid limit: {s}", .{val});
             };
         } else if (arg.len == 0 or arg[0] != '-') {
             topic_name = arg;
-            i += 1;
         } else {
             die("unknown option: {s}", .{arg});
         }
@@ -566,6 +512,8 @@ fn cmdRead(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
     if (topic_name == null) {
         die("usage: jwz list <topic> [--limit N] [--summary] [--json]", .{});
     }
+
+    output.setModeFromFlags(json, false, summary, false);
 
     const topic = try store.fetchTopic(topic_name.?);
     defer {
@@ -582,45 +530,43 @@ fn cmdRead(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
         allocator.free(messages);
     }
 
-    if (json) {
-        try stdout.writeByte('[');
+    if (output.mode == .json or output.mode == .json_pretty) {
+        try output.write("[");
         for (messages, 0..) |msg, idx| {
-            if (idx > 0) try stdout.writeByte(',');
-            try writeMessageJsonWithDepth(stdout, msg, 0); // Top-level messages have depth 0
+            if (idx > 0) try output.write(",");
+            try writeMessageJsonWithDepth(output, msg, 0);
         }
-        try stdout.writeAll("]\n");
+        try output.write("]\n");
     } else {
-        try stdout.print("{s}", .{topic.name});
+        try output.print("{s}", .{topic.name});
         if (topic.description.len > 0) {
-            try stdout.print(": {s}", .{topic.description});
+            try output.print(": {s}", .{topic.description});
         }
-        try stdout.writeByte('\n');
-        try stdout.writeAll("─────────────────────────\n");
+        try output.write("\n");
+        try output.write("─────────────────────────\n");
 
         if (messages.len == 0) {
-            try stdout.writeAll("No messages.\n");
+            try output.write("No messages.\n");
         } else {
             for (messages, 0..) |msg, idx| {
                 const is_last = (idx == messages.len - 1);
-                try printMessageTree(allocator, stdout, store, msg, 0, is_last, summary);
+                try printMessageTree(allocator, output, store, msg, 0, is_last, summary);
             }
         }
     }
 }
 
-fn cmdShow(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdShow(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     var message_id: ?[]const u8 = null;
     var json = false;
 
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--json")) {
+        if (cli.matchesFlag(arg, null, "json")) {
             json = true;
-            i += 1;
         } else if (arg.len == 0 or arg[0] != '-') {
             message_id = arg;
-            i += 1;
         } else {
             die("unknown option: {s}", .{arg});
         }
@@ -630,48 +576,47 @@ fn cmdShow(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
         die("usage: jwz show <message-id> [--json]", .{});
     }
 
+    output.setModeFromFlags(json, false, false, false);
+
     const msg = try store.fetchMessage(message_id.?);
     defer {
         var m = msg;
         m.deinit(allocator);
     }
 
-    if (json) {
-        try writeMessageJson(stdout, msg);
-        try stdout.writeByte('\n');
+    if (output.mode == .json or output.mode == .json_pretty) {
+        try writeMessageJson(output, msg);
+        try output.write("\n");
     } else {
-        try stdout.print("{s}", .{msg.id});
+        try output.print("{s}", .{msg.id});
         if (msg.sender) |sender| {
-            try stdout.print(" by {s}", .{sender.name});
+            try output.print(" by {s}", .{sender.name});
             if (sender.model) |model| {
-                try stdout.print(" [{s}]", .{model});
+                try output.print(" [{s}]", .{model});
             }
         }
         if (msg.reply_count > 0) {
-            try stdout.print(" ({d} replies)", .{msg.reply_count});
+            try output.print(" ({d} replies)", .{msg.reply_count});
         }
-        try stdout.print(" {s}\n", .{formatTimeAgo(msg.created_at)});
-        try stdout.print("  {s}\n", .{msg.body});
+        try output.print(" {s}\n", .{formatTimeAgo(msg.created_at)});
+        try output.print("  {s}\n", .{msg.body});
     }
 }
 
-fn cmdThread(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdThread(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     var message_id: ?[]const u8 = null;
     var json = false;
     var summary = false;
 
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--json")) {
+        if (cli.matchesFlag(arg, null, "json")) {
             json = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "-s")) {
+        } else if (cli.matchesFlag(arg, 's', "summary")) {
             summary = true;
-            i += 1;
         } else if (arg.len == 0 or arg[0] != '-') {
             message_id = arg;
-            i += 1;
         } else {
             die("unknown option: {s}", .{arg});
         }
@@ -680,6 +625,8 @@ fn cmdThread(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
     if (message_id == null) {
         die("usage: jwz thread <message-id> [--summary] [--json]", .{});
     }
+
+    output.setModeFromFlags(json, false, summary, false);
 
     const messages = try store.fetchThread(message_id.?);
     defer {
@@ -690,12 +637,12 @@ fn cmdThread(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
         allocator.free(messages);
     }
 
-    if (json) {
+    if (output.mode == .json or output.mode == .json_pretty) {
         // Build depth map for JSON output
         var depth_map = std.StringHashMap(u32).init(allocator);
         defer depth_map.deinit();
 
-        try stdout.writeByte('[');
+        try output.write("[");
         for (messages, 0..) |msg, idx| {
             const depth: u32 = if (msg.parent_id) |pid| blk: {
                 const parent_depth = depth_map.get(pid) orelse 0;
@@ -703,10 +650,10 @@ fn cmdThread(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
             } else 0;
             try depth_map.put(msg.id, depth);
 
-            if (idx > 0) try stdout.writeByte(',');
-            try writeMessageJsonWithDepth(stdout, msg, depth);
+            if (idx > 0) try output.write(",");
+            try writeMessageJsonWithDepth(output, msg, depth);
         }
-        try stdout.writeAll("]\n");
+        try output.write("]\n");
     } else {
         // Build depth map and last-sibling map for display
         var depth_map = std.StringHashMap(u32).init(allocator);
@@ -737,57 +684,57 @@ fn cmdThread(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
             // Print with indentation
             var indent_i: u32 = 0;
             while (indent_i < depth) : (indent_i += 1) {
-                try stdout.writeAll("  ");
+                try output.write("  ");
             }
             if (depth > 0) {
                 if (is_last_sibling) {
-                    try stdout.writeAll("└─ ");
+                    try output.write("└─ ");
                 } else {
-                    try stdout.writeAll("├─ ");
+                    try output.write("├─ ");
                 }
             } else {
-                try stdout.writeAll("▶ ");
+                try output.write("▶ ");
             }
 
-            try stdout.print("{s}", .{msg.id});
+            try output.print("{s}", .{msg.id});
             if (msg.sender) |sender| {
                 // Show role prominently if available, otherwise show name
                 if (sender.role) |role| {
-                    try stdout.print(" by {s}", .{role});
+                    try output.print(" by {s}", .{role});
                 } else {
-                    try stdout.print(" by {s}", .{sender.name});
+                    try output.print(" by {s}", .{sender.name});
                 }
                 if (sender.model) |model| {
-                    try stdout.print(" [{s}]", .{model});
+                    try output.print(" [{s}]", .{model});
                 }
             }
             if (msg.reply_count > 0) {
-                try stdout.print(" ({d} replies)", .{msg.reply_count});
+                try output.print(" ({d} replies)", .{msg.reply_count});
             }
-            try stdout.print(" {s}\n", .{formatTimeAgo(msg.created_at)});
+            try output.print(" {s}\n", .{formatTimeAgo(msg.created_at)});
 
             // Print body with indentation (truncated in summary mode)
             const body_indent = depth + 1;
             indent_i = 0;
             while (indent_i < body_indent) : (indent_i += 1) {
-                try stdout.writeAll("  ");
+                try output.write("  ");
             }
             if (summary) {
                 // Show first line only, truncated to 80 chars (UTF-8 safe)
                 const first_line = if (std.mem.indexOf(u8, msg.body, "\n")) |nl| msg.body[0..nl] else msg.body;
                 const truncated = truncateUtf8(first_line, 77);
-                try stdout.writeAll(truncated);
-                if (first_line.len > 77) try stdout.writeAll("...");
-                try stdout.writeAll("\n\n");
+                try output.write(truncated);
+                if (first_line.len > 77) try output.write("...");
+                try output.write("\n\n");
             } else {
-                try printIndented(stdout, msg.body, body_indent);
-                try stdout.writeAll("\n\n");
+                try printIndented(output, msg.body, body_indent);
+                try output.write("\n\n");
             }
         }
     }
 }
 
-fn cmdSearch(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdSearch(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     var query: ?[]const u8 = null;
     var topic_name: ?[]const u8 = null;
     var limit: u32 = 20;
@@ -795,24 +742,21 @@ fn cmdSearch(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
     var summary = false;
 
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--json")) {
+        if (cli.matchesFlag(arg, null, "json")) {
             json = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--summary") or std.mem.eql(u8, arg, "-s")) {
+        } else if (cli.matchesFlag(arg, 's', "summary")) {
             summary = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--topic")) {
+        } else if (cli.matchesFlag(arg, null, "topic")) {
             topic_name = nextValue(args, &i, "topic");
-        } else if (std.mem.eql(u8, arg, "--limit")) {
+        } else if (cli.matchesFlag(arg, null, "limit")) {
             const val = nextValue(args, &i, "limit");
             limit = std.fmt.parseInt(u32, val, 10) catch {
                 die("invalid limit: {s}", .{val});
             };
         } else if (arg.len == 0 or arg[0] != '-') {
             query = arg;
-            i += 1;
         } else {
             die("unknown option: {s}", .{arg});
         }
@@ -821,6 +765,8 @@ fn cmdSearch(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
     if (query == null) {
         die("usage: jwz search <query> [--topic t] [--limit N] [-s|--summary] [--json]", .{});
     }
+
+    output.setModeFromFlags(json, false, summary, false);
 
     const messages = try store.searchMessages(query.?, topic_name, limit);
     defer {
@@ -831,34 +777,34 @@ fn cmdSearch(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args:
         allocator.free(messages);
     }
 
-    if (json) {
-        try stdout.writeByte('[');
+    if (output.mode == .json or output.mode == .json_pretty) {
+        try output.write("[");
         for (messages, 0..) |msg, idx| {
-            if (idx > 0) try stdout.writeByte(',');
-            try writeMessageJson(stdout, msg);
+            if (idx > 0) try output.write(",");
+            try writeMessageJson(output, msg);
         }
-        try stdout.writeAll("]\n");
+        try output.write("]\n");
     } else {
         if (messages.len == 0) {
-            try stdout.writeAll("No results found.\n");
+            try output.write("No results found.\n");
         } else {
-            try stdout.print("Found {d} result(s):\n\n", .{messages.len});
+            try output.print("Found {d} result(s):\n\n", .{messages.len});
             for (messages) |msg| {
-                try stdout.print("{s} {s}\n", .{ msg.id, formatTimeAgo(msg.created_at) });
+                try output.print("{s} {s}\n", .{ msg.id, formatTimeAgo(msg.created_at) });
                 // Truncate body for display
                 const max_len: usize = 80;
                 const first_line = if (std.mem.indexOf(u8, msg.body, "\n")) |nl| msg.body[0..nl] else msg.body;
                 const body_to_use = if (summary) first_line else msg.body;
                 const display_body = if (body_to_use.len > max_len) body_to_use[0..max_len] else body_to_use;
-                try stdout.print("  {s}", .{display_body});
-                if (body_to_use.len > max_len) try stdout.writeAll("...");
-                try stdout.writeAll("\n\n");
+                try output.print("  {s}", .{display_body});
+                if (body_to_use.len > max_len) try output.write("...");
+                try output.write("\n\n");
             }
         }
     }
 }
 
-fn cmdBlob(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdBlob(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     if (args.len < 1) {
         die("usage: jwz blob <put|get|info> [options]", .{});
     }
@@ -866,32 +812,30 @@ fn cmdBlob(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: [
     const subcmd = args[0];
 
     if (std.mem.eql(u8, subcmd, "put")) {
-        try cmdBlobPut(allocator, stdout, store, args[1..]);
+        try cmdBlobPut(allocator, output, store, args[1..]);
     } else if (std.mem.eql(u8, subcmd, "get")) {
-        try cmdBlobGet(allocator, stdout, store, args[1..]);
+        try cmdBlobGet(allocator, output, store, args[1..]);
     } else if (std.mem.eql(u8, subcmd, "info")) {
-        try cmdBlobInfo(allocator, stdout, store, args[1..]);
+        try cmdBlobInfo(allocator, output, store, args[1..]);
     } else {
         die("unknown blob subcommand: {s}", .{subcmd});
     }
 }
 
-fn cmdBlobPut(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdBlobPut(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     var file_path: ?[]const u8 = null;
     var mime_type: ?[]const u8 = null;
     var json = false;
 
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--json")) {
+        if (cli.matchesFlag(arg, null, "json")) {
             json = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--mime") or std.mem.eql(u8, arg, "-t")) {
+        } else if (cli.matchesFlag(arg, 't', "mime")) {
             mime_type = nextValue(args, &i, "mime");
         } else if (arg.len == 0 or arg[0] != '-') {
             file_path = arg;
-            i += 1;
         } else {
             die("unknown option: {s}", .{arg});
         }
@@ -900,6 +844,8 @@ fn cmdBlobPut(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args
     if (file_path == null) {
         die("usage: jwz blob put <file> [--mime TYPE] [--json]", .{});
     }
+
+    output.setModeFromFlags(json, false, false, false);
 
     // Read file contents
     const file = std.fs.cwd().openFile(file_path.?, .{}) catch |err| {
@@ -916,24 +862,17 @@ fn cmdBlobPut(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args
     const blob_id = try store.putBlob(data, mime_type);
     defer allocator.free(blob_id);
 
-    if (json) {
-        const record = .{ .id = blob_id, .size = data.len };
-        try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
-        try stdout.writeByte('\n');
-    } else {
-        try stdout.print("{s}\n", .{blob_id});
-    }
+    try output.record(.{ .id = blob_id, .size = data.len });
 }
 
-fn cmdBlobGet(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdBlobGet(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     var blob_id: ?[]const u8 = null;
 
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (arg.len == 0 or arg[0] != '-') {
             blob_id = arg;
-            i += 1;
         } else {
             die("unknown option: {s}", .{arg});
         }
@@ -952,22 +891,20 @@ fn cmdBlobGet(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args
     defer allocator.free(data);
 
     // Write raw blob data to stdout
-    try stdout.writeAll(data);
+    try output.write(data);
 }
 
-fn cmdBlobInfo(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdBlobInfo(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     var blob_id: ?[]const u8 = null;
     var json = false;
 
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--json")) {
+        if (cli.matchesFlag(arg, null, "json")) {
             json = true;
-            i += 1;
         } else if (arg.len == 0 or arg[0] != '-') {
             blob_id = arg;
-            i += 1;
         } else {
             die("unknown option: {s}", .{arg});
         }
@@ -977,6 +914,8 @@ fn cmdBlobInfo(allocator: std.mem.Allocator, stdout: anytype, store: *Store, arg
         die("usage: jwz blob info <hash> [--json]", .{});
     }
 
+    output.setModeFromFlags(json, false, false, false);
+
     var blob = store.fetchBlob(blob_id.?) catch |err| {
         if (err == error.BlobNotFound) {
             die("blob not found: {s}", .{blob_id.?});
@@ -985,53 +924,37 @@ fn cmdBlobInfo(allocator: std.mem.Allocator, stdout: anytype, store: *Store, arg
     };
     defer blob.deinit(allocator);
 
-    if (json) {
-        const record = .{
-            .id = blob.id,
-            .size = blob.size,
-            .mime_type = blob.mime_type,
-            .created_at = blob.created_at,
-        };
-        try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
-        try stdout.writeByte('\n');
-    } else {
-        try stdout.print("ID: {s}\n", .{blob.id});
-        try stdout.print("Size: {d} bytes\n", .{blob.size});
-        if (blob.mime_type) |mt| {
-            try stdout.print("Type: {s}\n", .{mt});
-        }
-        try stdout.print("Created: {s}\n", .{formatTimeAgo(blob.created_at)});
-    }
+    try output.record(.{
+        .id = blob.id,
+        .size = blob.size,
+        .mime_type = blob.mime_type,
+        .created_at = blob.created_at,
+    });
 }
 
-fn cmdMigrate(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args: []const []const u8) !void {
+fn cmdMigrate(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, args: []const []const u8) !void {
     var source_path: ?[]const u8 = null;
     var json = false;
     var dry_run = false;
 
     var i: usize = 0;
-    while (i < args.len) {
+    while (i < args.len) : (i += 1) {
         const arg = args[i];
-        if (std.mem.eql(u8, arg, "--json")) {
+        if (cli.matchesFlag(arg, null, "json")) {
             json = true;
-            i += 1;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--dry-run")) {
+        } else if (cli.matchesFlag(arg, null, "dry-run")) {
             dry_run = true;
-            i += 1;
-            continue;
-        }
-        if (arg.len > 0 and arg[0] != '-') {
+        } else if (arg.len > 0 and arg[0] != '-') {
             if (source_path != null) die("multiple source paths provided", .{});
             source_path = arg;
-            i += 1;
-            continue;
+        } else {
+            die("unknown flag: {s}", .{arg});
         }
-        die("unknown flag: {s}", .{arg});
     }
 
     if (source_path == null) die("usage: jwz migrate <source-store> [--dry-run] [--json]", .{});
+
+    output.setModeFromFlags(json, false, false, false);
 
     // Resolve source path
     const resolved_source = try resolveStorePath(allocator, source_path.?);
@@ -1191,23 +1114,17 @@ fn cmdMigrate(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args
     const topics_migrated = topic_lines.items.len;
     const messages_migrated = message_lines.items.len;
 
-    if (json) {
-        const record = struct {
-            dry_run: bool,
-            topics: usize,
-            messages: usize,
-        }{
+    if (output.mode == .json or output.mode == .json_pretty) {
+        try output.record(.{
             .dry_run = dry_run,
             .topics = topics_migrated,
             .messages = messages_migrated,
-        };
-        try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
-        try stdout.writeByte('\n');
+        });
     } else {
         if (dry_run) {
-            try stdout.print("Would migrate {d} topic(s), {d} message(s) from {s}\n", .{ topics_migrated, messages_migrated, resolved_source });
+            try output.print("Would migrate {d} topic(s), {d} message(s) from {s}\n", .{ topics_migrated, messages_migrated, resolved_source });
         } else {
-            try stdout.print("Migrating {d} topic(s), {d} message(s) from {s}\n", .{ topics_migrated, messages_migrated, resolved_source });
+            try output.print("Migrating {d} topic(s), {d} message(s) from {s}\n", .{ topics_migrated, messages_migrated, resolved_source });
         }
     }
 
@@ -1235,62 +1152,62 @@ fn cmdMigrate(allocator: std.mem.Allocator, stdout: anytype, store: *Store, args
     // Import new records into SQLite
     try store.importIfNeeded();
 
-    if (!json) {
-        try stdout.print("Migration complete.\n", .{});
+    if (output.mode == .human or output.mode == .summary) {
+        try output.info("Migration complete.", .{});
     }
 }
 
 // ========== Helpers ==========
 
-fn printMessageTree(allocator: std.mem.Allocator, stdout: anytype, store: *Store, msg: jwz.store.Message, depth: u32, is_last: bool, summary: bool) !void {
+fn printMessageTree(allocator: std.mem.Allocator, output: *cli.Output, store: *Store, msg: jwz.store.Message, depth: u32, is_last: bool, summary: bool) !void {
     // Print indentation
     var indent_i: u32 = 0;
     while (indent_i < depth) : (indent_i += 1) {
-        try stdout.writeAll("  ");
+        try output.write("  ");
     }
     if (depth > 0) {
         if (is_last) {
-            try stdout.writeAll("└─ ");
+            try output.write("└─ ");
         } else {
-            try stdout.writeAll("├─ ");
+            try output.write("├─ ");
         }
     } else {
-        try stdout.writeAll("▶ ");
+        try output.write("▶ ");
     }
 
-    try stdout.print("{s}", .{msg.id});
+    try output.print("{s}", .{msg.id});
     if (msg.sender) |sender| {
         // Show role prominently if available, otherwise show name
         if (sender.role) |role| {
-            try stdout.print(" by {s}", .{role});
+            try output.print(" by {s}", .{role});
         } else {
-            try stdout.print(" by {s}", .{sender.name});
+            try output.print(" by {s}", .{sender.name});
         }
         if (sender.model) |model| {
-            try stdout.print(" [{s}]", .{model});
+            try output.print(" [{s}]", .{model});
         }
     }
     if (msg.reply_count > 0) {
-        try stdout.print(" ({d} replies)", .{msg.reply_count});
+        try output.print(" ({d} replies)", .{msg.reply_count});
     }
-    try stdout.print(" {s}\n", .{formatTimeAgo(msg.created_at)});
+    try output.print(" {s}\n", .{formatTimeAgo(msg.created_at)});
 
     // Print body (truncated in summary mode)
     const body_indent = depth + 1;
     indent_i = 0;
     while (indent_i < body_indent) : (indent_i += 1) {
-        try stdout.writeAll("  ");
+        try output.write("  ");
     }
     if (summary) {
         // Show first line only, truncated to 80 chars (UTF-8 safe)
         const first_line = if (std.mem.indexOf(u8, msg.body, "\n")) |nl| msg.body[0..nl] else msg.body;
         const truncated = truncateUtf8(first_line, 77);
-        try stdout.writeAll(truncated);
-        if (first_line.len > 77) try stdout.writeAll("...");
-        try stdout.writeAll("\n\n");
+        try output.write(truncated);
+        if (first_line.len > 77) try output.write("...");
+        try output.write("\n\n");
     } else {
-        try printIndented(stdout, msg.body, body_indent);
-        try stdout.writeAll("\n\n");
+        try printIndented(output, msg.body, body_indent);
+        try output.write("\n\n");
     }
 
     // Print replies (increased depth limit to 10 for better conversation visibility)
@@ -1305,12 +1222,12 @@ fn printMessageTree(allocator: std.mem.Allocator, stdout: anytype, store: *Store
         }
         for (replies, 0..) |reply, idx| {
             const reply_is_last = (idx == replies.len - 1);
-            try printMessageTree(allocator, stdout, store, reply, depth + 1, reply_is_last, summary);
+            try printMessageTree(allocator, output, store, reply, depth + 1, reply_is_last, summary);
         }
     }
 }
 
-fn writeMessageJson(stdout: anytype, msg: jwz.store.Message) !void {
+fn writeMessageJson(output: *cli.Output, msg: jwz.store.Message) !void {
     // Use separate struct without depth field for show/search (depth not applicable)
     const SenderJson = struct {
         id: []const u8,
@@ -1357,10 +1274,12 @@ fn writeMessageJson(stdout: anytype, msg: jwz.store.Message) !void {
         .sender = sender_json,
         .git = git_json,
     };
-    try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
+    const json_str = std.json.Stringify.valueAlloc(output.allocator, record, .{}) catch return error.OutOfMemory;
+    defer output.allocator.free(json_str);
+    try output.write(json_str);
 }
 
-fn writeMessageJsonWithDepth(stdout: anytype, msg: jwz.store.Message, depth: ?u32) !void {
+fn writeMessageJsonWithDepth(output: *cli.Output, msg: jwz.store.Message, depth: ?u32) !void {
     // Build sender sub-object if present
     const SenderJson = struct {
         id: []const u8,
@@ -1410,7 +1329,9 @@ fn writeMessageJsonWithDepth(stdout: anytype, msg: jwz.store.Message, depth: ?u3
         .sender = sender_json,
         .git = git_json,
     };
-    try std.json.Stringify.value(record, .{ .whitespace = .minified }, stdout);
+    const json_str = std.json.Stringify.valueAlloc(output.allocator, record, .{}) catch return error.OutOfMemory;
+    defer output.allocator.free(json_str);
+    try output.write(json_str);
 }
 
 fn formatTimeAgo(timestamp_ms: i64) []const u8 {
@@ -1425,18 +1346,18 @@ fn formatTimeAgo(timestamp_ms: i64) []const u8 {
 }
 
 /// Print text with proper indentation on each line
-fn printIndented(stdout: anytype, text: []const u8, indent: u32) !void {
+fn printIndented(output: *cli.Output, text: []const u8, indent: u32) !void {
     var iter = std.mem.splitScalar(u8, text, '\n');
     var first = true;
     while (iter.next()) |line| {
         if (!first) {
-            try stdout.writeByte('\n');
+            try output.write("\n");
             var i: u32 = 0;
             while (i < indent) : (i += 1) {
-                try stdout.writeAll("  ");
+                try output.write("  ");
             }
         }
-        try stdout.writeAll(line);
+        try output.write(line);
         first = false;
     }
 }
